@@ -11,6 +11,10 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 
 # --------------------------------------------------------------------- 服务
+# ★★ 安全红线：默认绑定 127.0.0.1，禁止改成 0.0.0.0 ★★
+#   本服务在测试环境下会挂载测试后门 /api/_test/*，其中 /api/_test/token
+#   能签发任意 TTL 的 token（含管理员身份）。绑 0.0.0.0 等于把管理员权限
+#   暴露给同局域网的任何人。
 HOST = os.getenv("SUT_HOST", "127.0.0.1")
 PORT = int(os.getenv("SUT_PORT", "8021"))
 

@@ -102,7 +102,7 @@
 | `backend/extra_apps/httprunner/loader.py` | 纳入版本控制 | Python 3.10 兼容 |
 | `backend/extra_apps/httprunner/report.py` | 纳入版本控制 | Python 3.10 兼容 |
 | `frontend/config/dev.env.js` | 纳入版本控制 | 本地端口对齐 |
-| `D:\Projects\svc.ps1`（不在本仓库内） | 新增短名 `sut`（端口 8021，工作目录 `D:\Projects\LunarLink\sut`，探测 `/health`） | 让 SUT 与其他项目统一启停；文件保持 UTF-8 with BOM |
+| `D:\Projects\svc.ps1`（不在本仓库内） | 新增短名 `sut`（端口 8021，工作目录 `D:\Projects\LunarLink\sut`，探测 `/health`）；`Get-Procs` 新增可选 `M`（命令行匹配串，支持数组 OR，定义后不再用 `D`）；仅 `lunar-be` 设置 `M = @('manage.py runserver 127.0.0.1:8001')` | 让 SUT 与其他项目统一启停；**修掉 `stop lunar-be` 误杀 SUT 的问题**（原因见第九节）。文件保持 UTF-8 with BOM |
 
 ---
 
@@ -172,3 +172,46 @@
 | SUT 服务 | `sut` → `http://127.0.0.1:8021/health` |
 | 服务启停 | `cd D:\Projects ; .\svc.ps1 start lunar-be,sut` |
 | 本地跑测试 | `cd lunarlink_tests ; ..\backend\.venv\Scripts\python.exe -m pytest --alluredir=allure-results --html=report.html --self-contained-html` |
+| 并行跑（产出"并行耗时"档） | 追加 `-n auto`（pytest-xdist） |
+| 回归冒烟账号 | 用户名 `smoke_regression` / 密码 `smoke123456`（`is_active=1`，非超管），由 `typing-extensions` 升级后的运行时回归引入，供阶段 2 平台冒烟套件复用 |
+| 后端认证头格式 | ★ `Authorization: <裸 token>`（**不带 `JWT ` 前缀**）—— `backend/utils/auth.py:MyJWTAuthentication` 直接把 `HTTP_AUTHORIZATION` 原文交给 `jwt_decode_handler`，实测带前缀会 401「签名解析失败」 |
+
+---
+
+## 九、踩坑与约定记录（★ 防复发）
+
+### 9.1 文本文件编码：两类文件两套规则
+
+| 谁读这个文件 | 要求 | 原因 |
+|---|---|---|
+| **Python**（`requirements-*.txt`、`.py` 源码等） | PEP263 coding 声明 或 UTF-8 BOM 都行 | pip 23.0.1 的 `auto_decode()` 在**既无 BOM 又无 coding 声明**时退回 `locale.getpreferredencoding()`；中文 Windows 下 locale 是 GBK，于是含中文注释的依赖文件直接 `UnicodeDecodeError: 'gbk' codec can't decode byte 0x80`。已在 `backend/requirements-test.txt` 第 1 行加 `# -*- coding: utf-8 -*-` 解决 |
+| **PowerShell 5.1**（`.ps1` 脚本） | ★ **必须 BOM** | PS 5.1 不认 PEP263，只会按 ANSI（中文系统 = GBK）读，非 ASCII 字符会导致乱码甚至语法错误。`D:\Projects\svc.ps1` 与 `sut\run-sut.ps1` 均已校验 `BOM=True` |
+
+### 9.2 `svc.ps1` 的服务复用约定（连带影响已修）
+
+服务应使用**自己项目目录内**的解释器。若某服务复用别的项目的 venv（例：`sut` 复用 LunarLink 的 `backend\.venv`），必须给**被复用的那个服务**设置 `M`（匹配串），否则 `stop` 会误伤。
+
+实测证据（`sut` + `lunar-be` 同时运行时）：
+
+```
+lunar-be 的 M 命中: pid 6404（venv python，svc.ps1 启动） + pid 4132（其子进程，持有 8001）
+旧 D 匹配会命中  : pid 14992（★ 就是 SUT 进程，误伤源头） + pid 6404
+```
+
+附带发现：`runserver` 在 venv 下会派生一个以 **base 解释器**（`D:\Python310\python.exe`）运行的子进程并持有端口，其命令行**不含** `LunarLink\backend` 路径 —— 旧的 `D` 匹配根本找不到它（只靠端口兜住），`M` 把这个漏杀隐患一并解决。
+
+双向回归结论（原始输出见提交记录）：`stop lunar-be` 后 `sut` 存活；`stop sut` 后 `lunar-be` 存活；`stop-all` 两者都停干净且无残留。
+
+### 9.3 查看 `pytest-html` 报告时不要用 grep 搜中文
+
+`pytest-html 4.x` 把全部数据塞进 `<div id="data-container" data-jsonblob="...">`，且 `json.dumps` 默认 `ensure_ascii=True`，所以**中文以 `\uXXXX` 形式存储**（浏览器渲染正常）。用 `Select-String '中文'` 会误判为"报告里没有中文"。要看真实内容需先 `HtmlDecode` 再 `ConvertFrom-Json` 解 `data-jsonblob`。
+
+### 9.4 工具链体检结果（pytest 9.1.1 兼容性）
+
+`report.html` 的 `data-jsonblob.environment.Plugins` 实测输出：
+
+```
+allure-pytest 2.16.2 / html 4.2.0 / metadata 3.1.1 / xdist 3.8.0 / anyio 3.7.1 / Faker 7.0.1
+```
+
+**结论：不需要降级 pytest。** 5 条自检用例 `4 passed, 1 skipped`，`allure-results/` 产出 11 个文件，`report.html` 35.4 KB（`charset=utf-8`），`-n 2` 并行亦通过。
