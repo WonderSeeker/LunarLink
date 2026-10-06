@@ -1,0 +1,40 @@
+# -*- coding: utf-8 -*-
+# ============================================================================
+# LunarLink 测试改造依赖（pytest + Requests + Allure + mock SUT）
+# ============================================================================
+# 注意：本文件第 1 行的 PEP263 coding 声明是【必需的】，不要删。
+#   原因：Windows 中文环境下 locale 是 GBK，而 pip 23.0.1 的 auto_decode()
+#   在既无 UTF-8 BOM、又无 coding 声明时，会直接用 locale(GBK) 解码本文件，
+#   导致中文注释触发 UnicodeDecodeError: 'gbk' codec can't decode byte 0x80。
+#   加上 coding 声明后 pip 会按 utf-8 解码。
+# ============================================================================
+# 与 backend/requirements.txt 完全隔离，禁止合并（后者是后端运行时依赖）。
+#
+# 安装（必须用 backend/.venv 的解释器，不要用全局 pip）：
+#   & 'D:\Projects\LunarLink\backend\.venv\Scripts\python.exe' -m pip install -r backend/requirements-test.txt
+#
+# 关键约束说明：
+#   1. pydantic 固定 <2 —— backend/.venv 中已有 pydantic==1.9.0（后端在引用），
+#      FastAPI 0.100+ 同时兼容 pydantic v1/v2，此处显式约束避免 pip 顺手升级到 v2
+#      导致后端环境被破坏。
+#   2. uvicorn 保持 0.17.6（backend/.venv 中已存在），不做升级以减少依赖变动。
+#   3. 不引入 pytest-django —— 本项目是走 HTTP 的黑盒接口测试，而 Django 是 3.2.1
+#      （较老），引入 pytest-django 容易踩版本兼容问题。纯 pytest + requests 足够。
+#   4. pytest-xdist 用于产出「并行耗时」这一档回归耗时数据（README 耗时对比需要）。
+# ============================================================================
+
+# ---------------------------- 被测系统 mock SUT ----------------------------
+fastapi==0.100.1
+uvicorn==0.17.6
+pydantic<2
+
+# ---------------------------- 测试框架 -------------------------------------
+pytest
+pytest-xdist
+pytest-html
+
+# ---------------------------- 报告 -----------------------------------------
+allure-pytest
+
+# ---------------------------- 断言体系（JSON Schema 校验） ------------------
+jsonschema

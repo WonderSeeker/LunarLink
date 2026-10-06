@@ -77,6 +77,21 @@
 | 文件 | 说明 |
 |---|---|
 | `CHANGES.md` | 本文档 |
+| `backend/requirements-test.txt` | 测试依赖清单，与 `backend/requirements.txt` 完全隔离 |
+| `sut/__init__.py` | SUT 包与版本号 |
+| `sut/config.py` | SUT 配置中心（端口 8021 / SQLite 并发参数 / 鉴权与业务参数 / 订单状态机白名单） |
+| `sut/schema.sql` | SUT 库结构：8 张表（users / tokens / products / cart_items / orders / order_items / payments / payment_callbacks） |
+| `sut/db.py` | SQLite 连接与事务封装（WAL + `busy_timeout=15000` + 等锁退避重试 + `BEGIN IMMEDIATE`） |
+| `sut/errors.py` | 统一错误体 + 异常处理器（含 4 条状态码细则与「越权返 404」的安全设计说明） |
+| `sut/security.py` | 口令哈希（pbkdf2，标准库）与 token / 单号生成 |
+| `sut/store.py` | 数据访问层（手写 SQL）；当前含「用户」「商品」两节 |
+| `sut/app.py` | FastAPI 装配（顶部含「路由必须同步 def，禁止 async def」强制约束） |
+| `sut/run.py` | SUT 启动入口（8021） |
+| `sut/run-sut.ps1` | 本地启动器：为测试环境打开测试后门（`SUT_ENABLE_TEST_HOOKS=1`） |
+| `sut/seed.py` | 种子数据脚本（`--reset` 一键重建；商品库存刻意覆盖 0 / 1 / 3 等并发边界） |
+| `sut/routers/__init__.py` | 路由包 |
+| `sut/routers/system.py` | `/health` 健康检查（数据库不可用返回 503） |
+| `sut/routers/test_hooks.py` | 测试后门（仅 `SUT_ENABLE_TEST_HOOKS=1` 时挂载）；当前仅 `/api/_test/ping` |
 
 **修改**
 
@@ -87,6 +102,7 @@
 | `backend/extra_apps/httprunner/loader.py` | 纳入版本控制 | Python 3.10 兼容 |
 | `backend/extra_apps/httprunner/report.py` | 纳入版本控制 | Python 3.10 兼容 |
 | `frontend/config/dev.env.js` | 纳入版本控制 | 本地端口对齐 |
+| `D:\Projects\svc.ps1`（不在本仓库内） | 新增短名 `sut`（端口 8021，工作目录 `D:\Projects\LunarLink\sut`，探测 `/health`） | 让 SUT 与其他项目统一启停；文件保持 UTF-8 with BOM |
 
 ---
 
