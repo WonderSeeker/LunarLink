@@ -7,5 +7,5 @@ module.exports = {
     LUNAR_LINK: "'" + LunarLink + "'",
     RECORD_CASE_DOCS_URL:
         '"https://lunar-link-docs.fun/docs/guide/test_case.html"',
-    VUE_APP_BASE_URL: '"http://127.0.0.1:8000"' // 本地开发环境后端服务器地址
+    VUE_APP_BASE_URL: '"http://127.0.0.1:8001"' // 本地开发环境后端服务器地址
 };
