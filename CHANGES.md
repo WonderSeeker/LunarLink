@@ -65,7 +65,7 @@
 | 准备 | 切 `feat/pytest-refactor` 分支、修 `.gitignore`、建 `CHANGES.md` | ✅ 已完成 |
 | 阶段 1 | 摸清骨架：读 Django app 结构与 httprunner 内核，跑通「新建项目 → 新建用例 → 执行 → 看报告」，记录性能基线 | ✅ 链路已摸清（报告产出与基线数字待补） |
 | 阶段 2 | 用例层重构为 pytest + Requests + Allure（`lunarlink_tests/`） | 🚧 工程骨架 + 报告链路已通；业务用例待写 |
-| 阶段 3 | 业务测试套件（`sut/` mock 电商 + 100+ 用例，正常/异常/边界/并发/幂等/越权） | 🚧 SUT 已完整（24 路径 / 30 端点，并发防超卖与支付幂等均已实测）；pytest 用例待写 |
+| 阶段 3 | 业务测试套件（`sut/` mock 电商 + 100+ 用例，正常/异常/边界/并发/幂等/越权） | ✅ SUT 完整（25 路径 / 31 端点）+ **175 条用例全绿**（174 passed / 1 故意 skip） |
 | 阶段 4 | GitHub Actions 每日回归 + README（架构图 / 用例清单 / 耗时对比） | ⏳ 未开始 |
 
 ### 4.2 文件变更
@@ -106,6 +106,14 @@
 | `lunarlink_tests/utils/data.py` | 造数与隔离：`unique()` / `register()` / `create_product()`，一律 uuid 后缀 |
 | `lunarlink_tests/schemas/*.json` | `product` / `product_list` / `error`（金额字段一律约束 `"type":"integer"`） |
 | `lunarlink_tests/test_00_report_chain.py` | 工具链体检用例（8 条：报告链路 + fixture 链路 + Schema + ★ 契约锁定） |
+| `lunarlink_tests/test_01_auth.py` | 认证用例 33 条：注册边界 / 登录 / ★ 连续失败锁定边界 / token 矩阵 / 登出与续签 |
+| `lunarlink_tests/test_02_products.py` | 商品用例 39 条：分页·关键字·排序边界 / 详情 / 库存 / admin 权限与 CRUD |
+| `lunarlink_tests/test_03_cart.py` | 购物车用例 20 条：数量与库存校验 / ★ 同商品合并 / 越权 / 清空 / 下架商品处理 |
+| `lunarlink_tests/test_04_orders.py` | 订单用例 33 条：下单扣库存 / ★ 状态机矩阵 / 取消回滚库存 / 列表隔离 / 越权 |
+| `lunarlink_tests/test_05_payments.py` | 支付用例 14 条：创建支付单幂等复用 / ★ 幂等回调（落库三项断言）/ 金额校验 / 越权 |
+| `lunarlink_tests/test_06_flow_e2e.py` | 端到端 4 条：主链路 / 取消链路 / 库存不足回滚链路 / 双用户并发链路（均带 `allure.step`） |
+| `lunarlink_tests/test_07_concurrency.py` | ★ 并发与幂等 6 条：防超卖 / 同 notify_id 并发回调 / 并发加购合并 / 库存上限保护 |
+| `lunarlink_tests/test_08_security.py` | 安全用例 18 条：水平越权(404) / 垂直越权(403) / token 矩阵 / 信息泄露 / 参数注入 |
 | `sut/runtime.py` | 在途请求计数（供 reset 做并发保护） |
 | `backend/apps/lunaruser/management/commands/ensure_smoke_user.py` | Django 管理命令：幂等创建回归冒烟账号，让套件能在干净 DB 上自举 |
 
@@ -504,6 +512,69 @@ seed.py --reset（不加管道）                ->  用户数 = 3
 
 新增：fixture 链路（登录态客户端 / 只读 DB / 造数）、JSON Schema 校验（含相对 `$ref` 解析）、
 ★ 契约锁定。实测 `7 passed, 1 skipped in 0.95s`，`report.html` 与 `allure-results/` 正常产出。
+
+### 9.11 阶段 3 业务测试套件落地（第 11 个提交）
+
+**规模**：139 个用例函数（含 10 处 `parametrize`）展开为 **175 条用例**。
+
+```
+$ cd lunarlink_tests
+$ ..\backend\.venv\Scripts\python.exe -m pytest --alluredir=allure-results --html=report.html --self-contained-html
+174 passed, 1 skipped in 30.61s
+产物：allure-results/ 2097 个文件，report.html 147 KB
+（唯一 skip 是 test_00 里那条【故意】跳过的用例，用于验证 skip 在报告里的呈现）
+```
+
+**各文件用例数**
+
+| 文件 | 条数 | 文件 | 条数 |
+|---|---|---|---|
+| `test_00_report_chain.py` | 8 | `test_05_payments.py` | 14 |
+| `test_01_auth.py` | 33 | `test_06_flow_e2e.py` | 4 |
+| `test_02_products.py` | 39 | `test_07_concurrency.py` | 6 |
+| `test_03_cart.py` | 20 | `test_08_security.py` | 18 |
+| `test_04_orders.py` | 33 | **合计** | **175** |
+
+**场景类型分布**（源码级标记数，可重叠）：`security` 35 / `negative` 29 / `smoke` 26 /
+`regression` 23 / `boundary` 13 / `concurrency` 6。
+
+**★ 两条并发断言已落成用例，并从 allure 附件取回实证**
+
+```
+test_oversell            -> 并发下单结果 => 成功(201)=5  失败(409)=5  其他=[]  最终库存=0
+test_concurrent_same_notify_id -> 并发回调结果 => 首次入账=1  幂等命中=19  异常=[]  payment_callbacks 行数=1
+```
+
+断言写法刻意不是「看返回码对不对」，而是：
+`others == []`（无 5xx / 无死锁 / 无 database is locked）+ **计数守恒** + **落库校验**。
+
+**并发用例为什么用裸 requests 而不是 ApiClient**：并发线程里共享一个 `requests.Session`
+有额外风险，而这里要验证的是**服务端行为**；用裸 requests + 显式 `auth_headers()` 更干净、更可归因。
+准备阶段（批量注册、加购）仍串行做，避免把「注册」也卷进并发而污染归因。
+
+**★ 防 xdist 并行守卫（阶段 4 会踩的坑，提前挡住）**
+
+`conftest.py` 顶部：检测到 `PYTEST_XDIST_WORKER` 就 `pytest.exit`。
+原因：`sut_seeded` 是 session 级 + 整会话只 reset 一次，隐含「所有用例共享同一个 SUT 进程」。
+一旦 `pytest -n 2`，每个 worker 独立进程 → 各自 reset → 互相重置对方数据，
+而且 `RESET_BUSY` 守卫会把另一个 worker 的 reset 打成 409 → fixture 直接报错。
+**不加守卫的失败方式是「间歇性 flaky」（最难查）**，加了就是显式报错 + 说明。
+
+实测 `pytest -n 2` 的输出（被 pytest 包成 `ConftestImportFailure`，说明文字完整可见）：
+
+```
+_pytest.config.ConftestImportFailure: Exit: 本套件依赖「共享同一个 SUT 进程 + 会话级 reset」，
+不支持 xdist 并行。去掉 -n/--dist 参数，或为每个 worker 提供独立的 SUT 实例（不同端口 + 不同 DB）。
+```
+
+> 附注：`pytest.exit` 在 conftest 导入阶段抛出的异常会被 pytest 包成 `ConftestImportFailure`
+> 并附带一段 traceback。若希望输出更干净，可改在 `pytest_configure` 钩子里做同样的检查。
+> 当前保留顶部检查（最早拦截、最简单），行为已满足「显式报错 + 说明」。
+
+**一处防漂移设计**：`test_04_orders.py` 里维护了一份状态机白名单副本 `ALLOWED`，
+并有一条用例 `test_whitelist_matches_implementation` **逐条对着实现验证**（合法的断言 200、
+非法的断言 409）。这样本地副本与 `sut/config.py` 的漂移会立刻暴露，而不是让矩阵变成装饰。
+`REFUNDED` 刻意不写进矩阵 —— 本次跳过了退款，该状态不可达，写进去就是假断言。
 
 **两处对原设计的偏差（需知悉）**
 

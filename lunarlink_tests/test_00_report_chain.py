@@ -132,6 +132,10 @@ class TestReportChain:
         assert auth_headers("T", TOKEN_STYLE_LUNARLINK) == {"Authorization": "T"}
 
         # 行为验证：SUT 拒绝裸 token（证明上面的常量不是"写了个寂寞"）
-        token = buyer.token
-        bad = sut.get("/api/auth/profile", headers={"Authorization": token})
+        # 这里刻意用 auth_headers(..., TOKEN_STYLE_LUNARLINK) 生成"错误契约"的头，
+        # 而不是手拼字符串 —— 保持单一入口。
+        bad = sut.get(
+            "/api/auth/profile",
+            headers=auth_headers(buyer.token, TOKEN_STYLE_LUNARLINK),
+        )
         assert bad.status_code == 401, bad.text[:200]

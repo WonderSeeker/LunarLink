@@ -16,6 +16,7 @@
 
 import os
 import sys
+from typing import Any, Dict
 
 import allure
 import pytest
@@ -32,8 +33,21 @@ from utils.client import (  # noqa: E402
     TOKEN_STYLE_LUNARLINK,
     TOKEN_STYLE_SUT,
     ApiClient,
+    auth_headers,
 )
 from utils.db import SutDatabase  # noqa: E402
+
+# ===================================================================== 并行守卫
+# ★ 本套件依赖「所有用例共享同一个 SUT 进程 + 会话级 reset 只做一次」。
+#   一旦用 pytest -n 2，每个 worker 是独立进程 → 各自 reset → 互相把对方数据重置掉；
+#   而且 SUT 的 RESET_BUSY 守卫会把另一个 worker 的 reset 打成 409 → fixture 直接报错。
+#   不加守卫的失败方式是【间歇性 flaky】（最难查），加了就是显式报错 + 说明。
+if os.environ.get("PYTEST_XDIST_WORKER"):
+    pytest.exit(
+        "本套件依赖「共享同一个 SUT 进程 + 会话级 reset」，不支持 xdist 并行。\n"
+        "去掉 -n/--dist 参数，或为每个 worker 提供独立的 SUT 实例（不同端口 + 不同 DB）。",
+        returncode=1,
+    )
 
 DEFAULT_SUT_BASE_URL = "http://127.0.0.1:8021"
 DEFAULT_PLATFORM_BASE_URL = "http://127.0.0.1:8001"
@@ -128,7 +142,8 @@ def sut_seeded(sut_base_url: str, sut_ready: dict) -> bool:
 
     resp = requests.post(
         sut_base_url + "/api/system/reset",
-        headers={"Authorization": "Bearer " + boot.json()["token"]},
+        # ★ 走 auth_headers() 单一入口，不手拼 "Bearer " —— 契约变了这里会一起改
+        headers=auth_headers(boot.json()["token"], TOKEN_STYLE_SUT),
         timeout=60,
     )
     assert resp.status_code == 200, (
@@ -205,6 +220,40 @@ def buyer(sut_base_url: str, sut_buyer_token: str) -> ApiClient:
 def buyer2(sut_base_url: str, sut_buyer2_token: str) -> ApiClient:
     """买家二号 —— 专供【水平越权】用例：用它去访问 buyer 的资源，断言 404。"""
     return ApiClient(sut_base_url, sut_buyer2_token, TOKEN_STYLE_SUT, name="sut-buyer2")
+
+
+# ===================================================================== 函数级隔离
+# 购物车 / 订单 / 支付是「per-user 有状态资源」，用 session 级买家会让用例互相污染。
+# 最干净的隔离是【每个用例一个全新用户】—— 这也正是"靠造数不靠 reset"的落地方式。
+
+
+@pytest.fixture
+def fresh_buyer(sut_base_url: str, sut_seeded: bool) -> Dict[str, Any]:
+    """注册一个全新买家并返回 {username, password, id, token, client}。
+
+    客户端每次新建（不复用 session 级 client），避免带着上一个用例的 token。
+    """
+    from utils.data import register as register_user
+
+    anonymous = ApiClient(sut_base_url, token=None, token_style=TOKEN_STYLE_SUT, name="sut-新买家")
+    info = register_user(anonymous)
+    info["client"] = ApiClient(
+        sut_base_url, info["token"], TOKEN_STYLE_SUT, name="sut-{}".format(info["username"])
+    )
+    return info
+
+
+@pytest.fixture
+def fresh_buyer2(sut_base_url: str, sut_seeded: bool) -> Dict[str, Any]:
+    """第二个全新买家 —— 用于【水平越权】对照。"""
+    from utils.data import register as register_user
+
+    anonymous = ApiClient(sut_base_url, token=None, token_style=TOKEN_STYLE_SUT, name="sut-新买家2")
+    info = register_user(anonymous)
+    info["client"] = ApiClient(
+        sut_base_url, info["token"], TOKEN_STYLE_SUT, name="sut-{}".format(info["username"])
+    )
+    return info
 
 
 # ===================================================================== 数据库断言
