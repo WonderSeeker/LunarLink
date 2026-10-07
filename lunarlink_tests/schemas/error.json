@@ -1,0 +1,17 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "统一错误体",
+    "type": "object",
+    "required": ["code", "message"],
+    "properties": {
+        "code": {
+            "type": "string",
+            "description": "业务错误码，如 INSUFFICIENT_STOCK / INVALID_STATE_TRANSITION"
+        },
+        "message": {"type": "string"},
+        "detail": {
+            "description": "可选补充信息；可以为 null、对象或数组",
+            "type": ["object", "array", "null", "string"]
+        }
+    }
+}

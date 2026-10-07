@@ -97,9 +97,16 @@
 | `sut/routers/cart.py` | 购物车模块：查看 / 加购（同商品数量合并，首次 201、合并 200）/ 改数量 / 移除 / 清空 |
 | `sut/routers/orders.py` | 订单模块：下单（★ 事务内条件更新防超卖）/ 列表 / 详情 / 状态 / 取消（回滚库存）/ 发货（admin）/ 确认收货 |
 | `sut/routers/payments.py` | 支付模块（范围收敛版）：创建支付单（同订单幂等复用）+ ★ 幂等回调 |
+| `sut/routers/system.py` | `/health`（含 `inflight` 字段）+ `POST /api/system/reset`（仅 admin，带并发保护） |
 | `lunarlink_tests/pytest.ini` | pytest 配置：显式钉 rootdir + markers 定义 |
-| `lunarlink_tests/conftest.py` | 最小 fixture：`sut_base_url` / `platform_base_url` / 会话级 `sut_ready`（未就绪用 `pytest.exit` 终止整轮） |
-| `lunarlink_tests/test_00_report_chain.py` | 工具链体检用例（5 条；业务用例从 `test_01_auth.py` 开始） |
+| `lunarlink_tests/conftest.py` | 分层 fixture：session 级（地址 / 就绪 / **会话内一次性 reset** / 预置账号与客户端 / 只读 DB）+ function 级由用例自造 uuid 数据 |
+| `lunarlink_tests/utils/client.py` | `ApiClient` + **认证头契约单一入口** `auth_headers()`（SUT=Bearer、LunarLink=裸 token，实测得出） |
+| `lunarlink_tests/utils/db.py` | SUT 数据库**只读**断言助手（URI `mode=ro`，禁止测试绕过 API 改库） |
+| `lunarlink_tests/utils/schema.py` | JSON Schema 校验（`referencing.Registry` 解析相对 `$ref`），失败抛带路径的可读断言 |
+| `lunarlink_tests/utils/data.py` | 造数与隔离：`unique()` / `register()` / `create_product()`，一律 uuid 后缀 |
+| `lunarlink_tests/schemas/*.json` | `product` / `product_list` / `error`（金额字段一律约束 `"type":"integer"`） |
+| `lunarlink_tests/test_00_report_chain.py` | 工具链体检用例（8 条：报告链路 + fixture 链路 + Schema + ★ 契约锁定） |
+| `sut/runtime.py` | 在途请求计数（供 reset 做并发保护） |
 | `backend/apps/lunaruser/management/commands/ensure_smoke_user.py` | Django 管理命令：幂等创建回归冒烟账号，让套件能在干净 DB 上自举 |
 
 **修改**
@@ -455,6 +462,48 @@ seed.py --reset（不加管道）                ->  用户数 = 3
 **纪律：不要用 `| Select-Object -First N` 去截短原生命令的输出**（它截断的是管道，不是显示）。
 要么改用 `Select-Object -Last N`、要么用 `Out-String` 全量取回后自行裁剪、
 要么把输出重定向到文件再读。
+
+### 9.10 阶段 2 测试工程收尾（第 10 个提交）
+
+一次性把 `conftest.py`（分层 fixture）、`utils/{client,db,schema,data}.py`、
+`schemas/*.json` 与 SUT 的 `POST /api/system/reset` 一起设计落地。
+
+**① `reset` 的并发保护（可被真实触发，不只是代码）**
+
+`reset` 要删除数据库文件，而 Windows 在文件被其它请求持有时会拒绝删除；
+若不保护可能「删到一半失败」留下坏库。实现：`sut/runtime.py` 在途计数 +
+`app.py` 的 HTTP 中间件，`inflight > 1` 时直接 `409 RESET_BUSY`。
+
+实测（3 次并发 reset + 120 次并发读同时进行）：
+
+```
+普通用户 reset                 -> HTTP 403 FORBIDDEN
+匿名 reset                     -> HTTP 401 UNAUTHORIZED
+造脏数据后 admin reset          -> HTTP 200；users=3 products=10 脏数据残留=0（回到种子状态）
+3 次并发 reset                 -> [(409,'RESET_BUSY'), (409,'RESET_BUSY'), (200,'OK')]
+120 次并发读状态码分布          -> {200: 120}   ← 无 5xx
+/health                        -> 含 "inflight": 1（证明中间件在工作）
+```
+
+**② fixture 分层与数据隔离口径**
+
+| 层级 | 内容 | 理由 |
+|---|---|---|
+| session | 地址、`sut_ready`（未就绪 `pytest.exit` 终止整轮）、`sut_seeded`（**整会话只 reset 一次**）、`admin/buyer/buyer2` 客户端、`sut_db` | 只做一次的事不要每用例重做 |
+| function | 用例自己用 `utils/data.unique()` / `create_product()` 造 uuid 独立数据 | 隔离靠造数不靠 reset，用例可任意顺序/并行 |
+
+`buyer2` 的存在意义就是**水平越权**用例：用它访问 `buyer` 的资源，断言 404。
+
+**③ 认证头契约被固定成断言（防止有人"顺手修"后端）**
+
+`utils/client.py` 里 `TOKEN_STYLE_SUT = "bearer"` / `TOKEN_STYLE_LUNARLINK = "bare"` 是唯一改动点；
+`test_00` 里有一条 **★ 契约锁定**用例，既断言常量、也**行为验证**（用裸 token 打 SUT 必须 401）。
+将来契约变了会在这里失败并指向那两个常量，而不是散落在一堆用例里。
+
+**④ 工具链体检扩到 8 条**（`test_00_report_chain.py`）
+
+新增：fixture 链路（登录态客户端 / 只读 DB / 造数）、JSON Schema 校验（含相对 `$ref` 解析）、
+★ 契约锁定。实测 `7 passed, 1 skipped in 0.95s`，`report.html` 与 `allure-results/` 正常产出。
 
 **两处对原设计的偏差（需知悉）**
 

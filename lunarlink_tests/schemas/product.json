@@ -1,0 +1,21 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "商品",
+    "type": "object",
+    "required": ["id", "name", "description", "price_cents", "stock", "status", "created_at", "updated_at"],
+    "properties": {
+        "id": {"type": "integer", "minimum": 1},
+        "name": {"type": "string", "minLength": 1, "maxLength": 100},
+        "description": {"type": "string"},
+        "price_cents": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "★ 金额一律为整数「分」，浮点/字符串会在这里被抓住"
+        },
+        "stock": {"type": "integer", "minimum": 0},
+        "status": {"type": "integer", "enum": [0, 1], "description": "1=上架 0=下架"},
+        "created_at": {"type": "integer"},
+        "updated_at": {"type": "integer"}
+    },
+    "additionalProperties": false
+}

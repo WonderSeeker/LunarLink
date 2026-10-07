@@ -1,0 +1,16 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "商品分页列表",
+    "type": "object",
+    "required": ["items", "total", "page", "size"],
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {"$ref": "product.json"}
+        },
+        "total": {"type": "integer", "minimum": 0},
+        "page": {"type": "integer", "minimum": 1},
+        "size": {"type": "integer", "minimum": 1}
+    },
+    "additionalProperties": false
+}

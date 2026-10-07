@@ -23,9 +23,9 @@ test_07_concurrency.py 中的两个用例：
 ================================================================================
 """
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
-from . import __version__, config, db
+from . import __version__, config, db, runtime
 from .errors import register_exception_handlers
 from .routers import auth, cart, orders, payments, products, system
 
@@ -45,6 +45,16 @@ def create_app() -> FastAPI:
     )
 
     register_exception_handlers(app)
+
+    # 统计在途请求数，供 /api/system/reset 做并发保护（见 sut/runtime.py）。
+    # 中间件写成 async def 是安全的：只做计数，不碰 sqlite3。
+    @app.middleware("http")
+    async def _track_inflight(request: Request, call_next):
+        runtime.enter()
+        try:
+            return await call_next(request)
+        finally:
+            runtime.leave()
 
     # 幂等建表。放在这里而不是 startup 事件里，是为了让「直接 import sut.app」
     # 的路径（如 seed.py、CI 脚本）也能拿到可用的表结构。

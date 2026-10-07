@@ -71,3 +71,67 @@ class TestReportChain:
     @pytest.mark.smoke
     def test_skip_is_rendered(self):
         pytest.skip("故意跳过：用于验证 skip 在 allure / html 报告里的呈现")
+
+    @allure.title("fixture 链路可用：登录态客户端 / 只读 DB / 造数")
+    @allure.severity(allure.severity_level.CRITICAL)
+    @pytest.mark.smoke
+    def test_fixture_chain(self, buyer, sut_admin, sut_db):
+        # 已登录客户端能用
+        resp = buyer.get("/api/auth/profile")
+        assert resp.status_code == 200, resp.text[:200]
+        assert resp.json()["user"]["role"] == "customer"
+
+        # 只读 DB 能读
+        stock = sut_db.product_stock(1)
+        assert isinstance(stock, int) and stock >= 0
+
+        # 造数工具能创建 uuid 独立商品（隔离策略的基础）
+        from utils.data import create_product
+
+        product = create_product(sut_admin, price_cents=1234, stock=7)
+        assert product["id"] > 0
+        assert sut_db.product_stock(product["id"]) == 7
+
+    @allure.title("JSON Schema 校验可用（含相对 $ref 解析）")
+    @allure.severity(allure.severity_level.CRITICAL)
+    @pytest.mark.smoke
+    def test_json_schema_validation(self, sut):
+        from utils.schema import validate
+
+        resp = sut.get("/api/products", params={"size": 3})
+        assert resp.status_code == 200
+        validate(resp.json(), "product_list")
+
+        detail = sut.get("/api/products/1")
+        assert detail.status_code == 200
+        validate(detail.json(), "product")
+
+        err = sut.get("/api/products/99999")
+        assert err.status_code == 404
+        validate(err.json(), "error")
+
+    @allure.title("★ 契约锁定：SUT 用 Bearer，LunarLink 用裸 token")
+    @allure.severity(allure.severity_level.CRITICAL)
+    @pytest.mark.smoke
+    def test_auth_header_contracts(self, sut, buyer):
+        """把两个【实测得出的不同契约】固定成断言，防止有人"顺手修"后端或误改测试。
+
+        将来契约变了，这里会失败并指向 utils/client.py 的两个常量 —— 那是唯一的改动点。
+        """
+        from utils.client import (
+            TOKEN_STYLE_BARE,
+            TOKEN_STYLE_BEARER,
+            TOKEN_STYLE_LUNARLINK,
+            TOKEN_STYLE_SUT,
+            auth_headers,
+        )
+
+        assert TOKEN_STYLE_SUT == TOKEN_STYLE_BEARER
+        assert TOKEN_STYLE_LUNARLINK == TOKEN_STYLE_BARE
+        assert auth_headers("T") == {"Authorization": "Bearer T"}
+        assert auth_headers("T", TOKEN_STYLE_LUNARLINK) == {"Authorization": "T"}
+
+        # 行为验证：SUT 拒绝裸 token（证明上面的常量不是"写了个寂寞"）
+        token = buyer.token
+        bad = sut.get("/api/auth/profile", headers={"Authorization": token})
+        assert bad.status_code == 401, bad.text[:200]
