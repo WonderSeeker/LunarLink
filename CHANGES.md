@@ -102,7 +102,7 @@
 | `backend/extra_apps/httprunner/loader.py` | 纳入版本控制 | Python 3.10 兼容 |
 | `backend/extra_apps/httprunner/report.py` | 纳入版本控制 | Python 3.10 兼容 |
 | `frontend/config/dev.env.js` | 纳入版本控制 | 本地端口对齐 |
-| `D:\Projects\svc.ps1`（不在本仓库内） | 新增短名 `sut`（端口 8021，工作目录 `D:\Projects\LunarLink\sut`，探测 `/health`）；`Get-Procs` 新增可选 `M`（命令行匹配串，支持数组 OR，定义后不再用 `D`）；仅 `lunar-be` 设置 `M = @('manage.py runserver 127.0.0.1:8001')` | 让 SUT 与其他项目统一启停；**修掉 `stop lunar-be` 误杀 SUT 的问题**（原因见第九节）。文件保持 UTF-8 with BOM |
+| `D:\Projects\svc.ps1`（不在本仓库内） | 新增短名 `sut`（端口 8021，工作目录 `D:\Projects\LunarLink\sut`，探测 `/health`）；`Get-Procs` 新增可选 `M`（命令行匹配串，支持数组 OR，定义后不再用 `D`）；为 `lunar-be` / `rag` / `kbapi` / `wht-be` / `wht-worker` 共 5 个服务设置 `M`；`kbapi` 的启动参数由 `server.py` 改为 `server.py --port 8020` | 让 SUT 与其他项目统一启停；**消灭「同 D 服务互相误杀 / 漏杀」这一类 bug**（共 3 组，详见第九节 9.5）。文件保持 UTF-8 with BOM |
 
 ---
 
@@ -215,3 +215,48 @@ allure-pytest 2.16.2 / html 4.2.0 / metadata 3.1.1 / xdist 3.8.0 / anyio 3.7.1 /
 ```
 
 **结论：不需要降级 pytest。** 5 条自检用例 `4 passed, 1 skipped`，`allure-results/` 产出 11 个文件，`report.html` 35.4 KB（`charset=utf-8`），`-n 2` 并行亦通过。
+
+> ⚠️ 口径提醒：`-n 2` 通过只证明 xdist **能加载**，**不能**当作「并行能提速」的证据（3 条用例 0.37 秒，串行并行无差别）。阶段 3 讲并行耗时必须用真实规模用例集，并同时给出串行基线，否则该数字没有信息量。
+
+### 9.5 `svc.ps1` 的「同 D 互相误杀」全表排查（第 5 个提交）
+
+`Get-Procs` 的进程匹配有两路：**端口** + **命令行含 `D`**。当两个服务的 `D` 相同时，后一路会把对方的进程一并算进来 → `stop A` 连带杀掉 B；反之若某服务的子进程命令行里不含 `D`，则**漏杀**。
+
+对全部 18 个服务的 `D` 做了碰撞分析，共 **3 组**问题，均已用 `M` 修复：
+
+| 组 | 服务对 | 问题 | 修复（M 模式） |
+|---|---|---|---|
+| 1 | `lunar-be` × `sut` | `sut` 复用 `backend\.venv`，其命令行带 backend 路径 | `lunar-be → 'manage.py runserver 127.0.0.1:8001'` |
+| 2 | `rag` × `kbapi` | 同 `D:\Projects\KnowledgeBase-RAG-LLM-System` | `rag → 'app_chat.py'`；`kbapi → 'server.py --port 8020'` |
+| 3 | `wht-be` × `wht-worker` | 同 `D:\Projects\WHartTest\WHartTest_Django` | `wht-be → ['run-backend.ps1','manage.py runserver 127.0.0.1:8012']`；`wht-worker → ['run-celery-worker.ps1','-A wharttest_django worker']` |
+
+**实测证据（碰撞对 2，最能说明问题）**
+
+```
+wht-be  M1 'run-backend.ps1'              -> 1 个 [2904]        （powershell wrapper）
+wht-be  M2 'manage.py runserver ...:8012' -> 2 个 [22288,35148] （venv python + base python 子进程）
+wht-wk  M1 'run-celery-worker.ps1'        -> 1 个 [18100]       （powershell wrapper）
+wht-wk  M2 '-A wharttest_django worker'   -> 3 个 [12628,32256,27544]
+两者共用的旧 D 'WHartTest_Django'          -> 6 个 [两组全混在一起]  ← 旧行为：互杀
+```
+
+`stop wht-be` → `已停止 (3 个进程)`（只有 wht-be，wht-worker 的 4 个存活）；
+`stop wht-worker` → `已停止 (4 个进程)`（只有 wht-worker，wht-be 3 个存活 + 8012 在听 + HTTP 200）。
+`M` 的**数组 OR 分支由此变成真被测**：powershell wrapper 只能被 M1 命中、python 子进程只能被 M2 命中，两者必须 OR 才拼得齐。
+
+**排查中发现的 4 个反直觉事实（都是"想当然"会踩的坑）**
+
+1. **`-like` 不是正则**：反斜杠没有特殊含义。写成 `'run-backend\.ps1'` 要求前面真有一个反斜杠 → 永远匹配不到 `run-backend.ps1`。
+2. **`rag` 的进程树是 3 层**：setuptools 的 `streamlit.exe` launcher 会再 exec 一个 **venv python** 子进程，后者又 exec 一个 **base python**（`D:\Python311`）孙进程并持有端口：
+   ```
+   pid=12456 streamlit.exe  → "...\.venv\Scripts\streamlit.exe" run app_chat.py ...
+   pid=18984 python.exe     → "...\.venv\Scripts\python.exe" "...\streamlit.exe" run app_chat.py ...   ← 含 venv python 的绝对路径！
+   pid=25696 D:\Python311.. → "D:\Python311\python.exe" "...\streamlit.exe" run app_chat.py ...
+   ```
+   所以 `kbapi` 的 M **不能**用「该 venv 的 `python.exe` 绝对路径」—— 实测被 rag 的 `pid 18984` 命中（`svc.ps1 start kbapi` 曾因此误报"已在运行"）。
+3. **`kbapi` 与 `llm` 的子进程命令行形状完全一样**（都是 `"D:\Python3xx\python.exe" server.py`），只靠 `server.py` 无法区分。最终解法：**把默认端口显式写进启动参数**（`server.py --port 8020`，`server.py` 默认就是 8020，行为不变），用端口做唯一特征。
+4. **`wht-worker` 是最危险的**：`Port = 0`（无端口兜底），且 celery 子进程命令行用相对路径 `.\venv\Scripts\celery.exe`，**不含项目绝对路径** → 旧 `D` 匹配既误杀 wht-be、又漏杀自己。`M` 的两模式正好覆盖 powershell wrapper + celery 子进程。
+
+**遗留的同类隐患（本次未改，等你决定）**
+
+`llm` 未设 `M`，用 `D` 匹配。实测它的 `D`（`D:\Projects\WHartTest\llm-server`）**只命中 1 个进程**（父），派生出的子进程 `"D:\Python312\python.exe" server.py --port 11434 --dtype bfloat16` 命令行里不含该路径 → **漏杀**。目前靠 `Port = 11434` 兜住，暂无实际故障。若要与 wht-worker 同样稳妥，可加 `llm → 'server.py --port 11434'`（已验证该串在服务表内唯一）。本次按「减少改动面」原则未动。
