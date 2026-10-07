@@ -396,6 +396,10 @@ def clear_cart(user_id: int) -> int:
 
 # ===================================================================== 订单
 
+# 订单状态流转的作用域。见 _transition() 的说明：
+# user  = 按归属过滤（他人订单一律 404）；admin = 管理员跨归属。
+TRANSITION_SCOPES = ("user", "admin")
+
 
 def _apply_transition(conn: Any, order: Dict[str, Any], to_state: str) -> None:
     """★ 订单状态机校验：非法流转一律 409，并在 detail 里回传 from/to/allowed。"""
@@ -552,20 +556,39 @@ def get_order(order_no: str, user_id: Optional[int] = None) -> Optional[Dict[str
     return row
 
 
-def _transition_order(
-    order_no: str, user_id: Optional[int], to_state: str
+def _transition(
+    order_no: str,
+    to_state: str,
+    *,
+    scope: str,
+    user_id: Optional[int],
 ) -> Dict[str, Any]:
-    """流转订单状态。user_id 传 None 表示不按归属过滤（供 admin 发货使用）。"""
+    """订单状态流转的内部实现（不要直接调用，用下面两个显式入口）。
+
+    ★ 安全设计：scope 是【必填关键字参数】，user_id 的含义随 scope 而变，
+      刻意不接受「user_id=None 就自动变成管理员操作」这种隐式旁路：
+
+          scope="user"  -> user_id 必须提供，SQL 强制按归属过滤（越权 → 自然 404）
+          scope="admin" -> 不接受 user_id（调用处显式传 None），表示管理员跨归属操作
+
+      将来谁漏传 user_id，这里会直接抛 ValueError（而不是静默放行成跨用户操作），
+      属于「宁可炸掉也不要静默越权」的选择。
+    """
+    if scope not in TRANSITION_SCOPES:
+        raise ValueError("非法的 transition scope: {}".format(scope))
+    if scope == "user" and user_id is None:
+        raise ValueError("scope='user' 时必须提供 user_id（拒绝隐式跨归属）")
+
     now = security.now_ts()
     with db.transaction() as conn:
-        if user_id is None:
-            row = conn.execute(
-                "SELECT * FROM orders WHERE order_no = ?", (order_no,)
-            ).fetchone()
-        else:
+        if scope == "user":
             row = conn.execute(
                 "SELECT * FROM orders WHERE order_no = ? AND user_id = ?",
                 (order_no, user_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM orders WHERE order_no = ?", (order_no,)
             ).fetchone()
         if row is None:
             raise errors.NotFound("订单不存在", code="ORDER_NOT_FOUND")
@@ -606,18 +629,33 @@ def _transition_order(
     return get_order(order_no, user_id)
 
 
+def _transition_order(order_no: str, user_id: int, to_state: str) -> Dict[str, Any]:
+    """【按归属】流转订单状态：user_id 必填，他人的订单一律 404。"""
+    return _transition(order_no, to_state, scope="user", user_id=user_id)
+
+
+def _transition_order_as_admin(order_no: str, to_state: str) -> Dict[str, Any]:
+    """【管理员跨归属】流转订单状态。
+
+    ★ 全项目唯一的跨归属旁路入口：函数名自带 as_admin 标记，签名里根本没有 user_id，
+      因此不存在「漏传 user_id 就静默变成管理员操作」的可能。
+      调用方必须在 require_admin 之后显式调用它 —— 越权用例与这里要一起看才有说服力。
+    """
+    return _transition(order_no, to_state, scope="admin", user_id=None)
+
+
 def cancel_order(order_no: str, user_id: int) -> Dict[str, Any]:
     """PENDING -> CANCELLED，并回滚库存。"""
     return _transition_order(order_no, user_id, config.ORDER_STATUS_CANCELLED)
 
 
-def ship_order(order_no: str, user_id: Optional[int] = None) -> Dict[str, Any]:
-    """PAID -> SHIPPED（发货，admin 触发，不按归属过滤）。
+def ship_order(order_no: str) -> Dict[str, Any]:
+    """PAID -> SHIPPED（发货，仅 admin，跨归属）。
 
     ★ 这是原设计 6 个订单接口之外的补充：没有它 SHIPPED 状态不可达，
       confirm（SHIPPED -> COMPLETED）就永远无法成功，状态机也就测不完整。
     """
-    return _transition_order(order_no, user_id, config.ORDER_STATUS_SHIPPED)
+    return _transition_order_as_admin(order_no, config.ORDER_STATUS_SHIPPED)
 
 
 def confirm_order(order_no: str, user_id: int) -> Dict[str, Any]:

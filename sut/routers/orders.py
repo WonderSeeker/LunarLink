@@ -113,8 +113,9 @@ def cancel_order(order_no: str, principal: Dict[str, Any] = Depends(require_auth
 
 @router.post("/{order_no}/ship", summary="发货（PAID -> SHIPPED，仅 admin）")
 def ship_order(order_no: str, _admin=Depends(require_admin)):
-    # 发货由 admin 执行，不按订单归属过滤
-    return store.ship_order(order_no, None)
+    # ★ 显式走「管理员跨归属」入口：函数名 as_admin + 签名无 user_id，
+    #   避免把跨用户操作藏在「user_id=None」这种隐式旁路里。
+    return store.ship_order(order_no)
 
 
 @router.post("/{order_no}/confirm", summary="确认收货（SHIPPED -> COMPLETED）")

@@ -365,6 +365,15 @@ pid=8136  python.exe    "D:\Python312\python.exe" "…\flowfile.exe" run ui --no
 
 **★★ 并发实测（最核心的两条）**
 
+> ★ **口径（务必按这个说法，不要拔高）**
+> 这两条**不能**说成「证明了数据库级防超卖 / 证明了并发正确性」。原因：SQLite 是**单写者**模型，
+> 写入本来就被串行化，因此**测不出 MVCC 数据库（MySQL InnoDB / PG）下的竞争表现**。
+> 它们真正证明的是：**并发访问下不崩** —— 无死锁、无 `database is locked`、无 5xx，
+> 且**计数守恒**（5 成功 / 5 失败 / 最终 `stock=0`）。
+> 而「条件更新本身是原子的」这一点是**设计保证**，不是靠这两个测试证明的；
+> 测试只是把它在并发路径上验证了一遍、并暴露了锁竞争问题。
+> 表述模板：**「并发下无 5xx + 计数守恒；防超卖由单条原子条件更新（`UPDATE ... WHERE stock >= ?`）保证」**。
+
 ```
 5. 10 线程抢 5 件库存（同 SKU，各自购物车各 1 件，Barrier 同时发起下单）
    成功(201) = 5    失败(409) = 5    其他 = []
@@ -379,7 +388,7 @@ pid=8136  python.exe    "D:\Python312\python.exe" "…\flowfile.exe" run ui --no
 
 | 点 | 实现 | 断言 |
 |---|---|---|
-| 防超卖 | 事务内单条 `UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?`，靠 `rowcount` 判定；抛错则整个事务回滚 | 并发恰好 5 成功 / 5 失败 / 库存归零 |
+| 防超卖 | 事务内单条 `UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?`，靠 `rowcount` 判定；抛错则整个事务回滚。**原子性由这条 SQL 保证**（不是由并发测试证明） | 并发下**无 5xx + 计数守恒**：恰好 5 成功 / 5 失败 / 库存归零 |
 | 取消回滚库存 | 取消时按 `order_items` 反向 `stock = stock + qty` | 取消后库存回到下单前 |
 | 订单状态机 | 白名单 `config.ORDER_STATE_TRANSITIONS`；非法流转 409 + `detail.from/to/allowed` | `PENDING→COMPLETED` 409、`CANCELLED→CANCELLED` 409、`COMPLETED→CANCELLED` 409、`PAID→SHIPPED→COMPLETED` 200 |
 | 水平越权 | 订单/支付单/购物车条目一律先按 `user_id` 过滤，查不到即 404 | 查/取消/确认/发货/创建支付单他人订单 → 404 |
@@ -387,6 +396,65 @@ pid=8136  python.exe    "D:\Python312\python.exe" "…\flowfile.exe" run ui --no
 | 支付幂等 | `payment_callbacks.notify_id` **UNIQUE** 做闸门；重复回调捕获 `IntegrityError` → 返回首次结果且**不改任何字段** | 重复回调后 `paid_at` / `amount_paid_cents` 不变、`payment_callbacks` 仍 1 行 |
 | 分页边界 | `page<1` / `size<1` / `size>100` → 400；`page` 超大 → 200 空列表 | 区分「参数非法」与「无数据」 |
 | 加购合并 | `cart_items` 的 `UNIQUE(user_id, product_id)` + 事务内读-判-写 | 首次 201、重复 200 且数量合并；合并后超库存 409 |
+
+### 9.9 第 9 个提交：并发口径修正 + 订单状态流转的安全显式化 + 一个工具坑
+
+**① 并发口径修正（已同步到 9.8 的引用块）**
+
+表述从「证明了数据库级防超卖」收为
+**「并发下无 5xx + 计数守恒（5 成功 / 5 失败 / stock=0）；防超卖由单条原子条件更新保证」**。
+原因：SQLite 是单写者模型，写入本身被串行化，**测不出 MVCC 数据库（MySQL InnoDB / PG）下的竞争**；
+这两个测试的价值在于证明「并发访问不崩」（无死锁 / 无 `database is locked` / 无 5xx），
+而原子性是设计保证、不是被测试证明的。
+
+**② 订单状态流转：把隐式旁路改成显式入口（方案 A）**
+
+原实现 `_transition_order(order_no, user_id=None, ...)` 用「可空参数」表达跨归属旁路：
+今天安全（只有 `ship_order` 传 `None`，而它挂在 `require_admin` 后面），
+但将来任何人漏传 `user_id` 就会**静默变成跨用户管理员操作**。
+
+改为三层显式结构（`sut/store.py`）：
+
+```
+_transition(order_no, to_state, *, scope, user_id)     # 内部实现，scope 为必填关键字参数
+    scope="user"  -> 必须提供 user_id，SQL 强制按归属过滤（越权自然 404）
+    scope="admin" -> 不由 user_id 表达，调用处显式传 None
+    非法 scope、或 scope="user" 却不给 user_id -> 直接 ValueError（宁可炸掉也不静默越权）
+
+_transition_order(order_no, user_id, to_state)          # 按归属（user_id 必填）
+_transition_order_as_admin(order_no, to_state)          # ★ 全项目唯一跨归属入口：
+                                                        #   函数名带 as_admin 标记、签名里没有 user_id
+```
+
+`ship_order(order_no)` 现在只走 `_transition_order_as_admin`。
+
+**为什么值得改**（面试口径）：阶段 3 的 `test_08_security` 要测越权；
+如果实现里存在隐式旁路，用例通过可能是巧合 —— **显式实现 + 越权用例一起看才是有效证据**。
+
+**重验证**：聚焦脚本 16 项断言全通过（脚本已删），含
+
+```
+scope="user" + user_id=None  -> ValueError（拒绝隐式跨归属）      ← 单元级直接验证
+非法 scope                    -> ValueError
+越权矩阵：查/查状态/取消/确认他人订单 -> 404；普通用户发货 -> 403
+状态机：PAID -> SHIPPED（admin 显式入口）-> COMPLETED；终态再流转 -> 409；不存在订单发货 -> 404
+★ 并发回归：8 线程抢 3 件 -> 成功 3 / 失败(409) 5 / 库存 0 / 其他状态码 []（无 5xx）
+```
+
+**③ 一个会静默吃掉脚本的工具坑（★ 我踩了）**
+
+`python seed.py --reset | Select-Object -First 1` —— 我用它「防止输出刷屏」，
+结果 PowerShell 在取到第一个对象后就关闭了管道，Python 在打印第一行后即被中止，
+**`seed()` 根本没执行**（数据库连表都没建）。对照实验：
+
+```
+seed.py --reset | Select-Object -First 1  ->  sqlite3.OperationalError: no such table: users
+seed.py --reset（不加管道）                ->  用户数 = 3
+```
+
+**纪律：不要用 `| Select-Object -First N` 去截短原生命令的输出**（它截断的是管道，不是显示）。
+要么改用 `Select-Object -Last N`、要么用 `Out-String` 全量取回后自行裁剪、
+要么把输出重定向到文件再读。
 
 **两处对原设计的偏差（需知悉）**
 
