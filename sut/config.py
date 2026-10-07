@@ -44,7 +44,11 @@ WRITE_RETRY_BACKOFF_SECONDS = float(
 TOKEN_TTL_SECONDS = int(os.getenv("SUT_TOKEN_TTL_SECONDS", "900"))
 # 连续登录失败达到该次数即锁定账号（用于「密码连续错误 N 次锁定」用例）
 LOGIN_LOCK_THRESHOLD = int(os.getenv("SUT_LOGIN_LOCK_THRESHOLD", "5"))
-LOGIN_LOCK_SECONDS = int(os.getenv("SUT_LOGIN_LOCK_SECONDS", "60"))
+# 锁定时长。同时支持 AUTH_LOCK_SECONDS（测试里设 2 秒即可快速验证"自动解锁"）与
+# SUT_LOGIN_LOCK_SECONDS（与其他 SUT_* 配置保持同一命名风格）。
+LOGIN_LOCK_SECONDS = int(
+    os.getenv("AUTH_LOCK_SECONDS", os.getenv("SUT_LOGIN_LOCK_SECONDS", "60"))
+)
 
 # --------------------------------------------------------------------- 业务参数
 # 订单支付超时窗口：创建订单时写入 expire_at = now + ORDER_TTL_SECONDS

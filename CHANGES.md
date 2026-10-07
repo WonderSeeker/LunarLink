@@ -63,9 +63,9 @@
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | 准备 | 切 `feat/pytest-refactor` 分支、修 `.gitignore`、建 `CHANGES.md` | ✅ 已完成 |
-| 阶段 1 | 摸清骨架：读 Django app 结构与 httprunner 内核，跑通「新建项目 → 新建用例 → 执行 → 看报告」，记录性能基线 | 🚧 进行中 |
-| 阶段 2 | 用例层重构为 pytest + Requests + Allure（`lunarlink_tests/`） | ⏳ 未开始 |
-| 阶段 3 | 业务测试套件（`sut/` mock 电商 + 100+ 用例，正常/异常/边界/并发/幂等/越权） | ⏳ 未开始 |
+| 阶段 1 | 摸清骨架：读 Django app 结构与 httprunner 内核，跑通「新建项目 → 新建用例 → 执行 → 看报告」，记录性能基线 | ✅ 链路已摸清（报告产出与基线数字待补） |
+| 阶段 2 | 用例层重构为 pytest + Requests + Allure（`lunarlink_tests/`） | 🚧 工程骨架 + 报告链路已通；业务用例待写 |
+| 阶段 3 | 业务测试套件（`sut/` mock 电商 + 100+ 用例，正常/异常/边界/并发/幂等/越权） | 🚧 SUT 骨架 + auth 模块已完成；商品/购物车/订单/支付待做 |
 | 阶段 4 | GitHub Actions 每日回归 + README（架构图 / 用例清单 / 耗时对比） | ⏳ 未开始 |
 
 ### 4.2 文件变更
@@ -91,7 +91,12 @@
 | `sut/seed.py` | 种子数据脚本（`--reset` 一键重建；商品库存刻意覆盖 0 / 1 / 3 等并发边界） |
 | `sut/routers/__init__.py` | 路由包 |
 | `sut/routers/system.py` | `/health` 健康检查（数据库不可用返回 503） |
-| `sut/routers/test_hooks.py` | 测试后门（仅 `SUT_ENABLE_TEST_HOOKS=1` 时挂载）；当前仅 `/api/_test/ping` |
+| `sut/routers/test_hooks.py` | 测试后门（仅 `SUT_ENABLE_TEST_HOOKS=1` 时挂载）：`/api/_test/ping`、`/api/_test/token`（签发任意 TTL，**等价认证绕过**）、`/api/_test/user/{username}/unlock` |
+| `sut/routers/auth.py` | 认证模块：注册 / 登录（连续失败 5 次锁定 423 + Retry-After）/ 登出（纯 no-op）/ profile / refresh（旧换新） |
+| `lunarlink_tests/pytest.ini` | pytest 配置：显式钉 rootdir + markers 定义 |
+| `lunarlink_tests/conftest.py` | 最小 fixture：`sut_base_url` / `platform_base_url` / 会话级 `sut_ready`（未就绪用 `pytest.exit` 终止整轮） |
+| `lunarlink_tests/test_00_report_chain.py` | 工具链体检用例（5 条；业务用例从 `test_01_auth.py` 开始） |
+| `backend/apps/lunaruser/management/commands/ensure_smoke_user.py` | Django 管理命令：幂等创建回归冒烟账号，让套件能在干净 DB 上自举 |
 
 **修改**
 
@@ -102,7 +107,7 @@
 | `backend/extra_apps/httprunner/loader.py` | 纳入版本控制 | Python 3.10 兼容 |
 | `backend/extra_apps/httprunner/report.py` | 纳入版本控制 | Python 3.10 兼容 |
 | `frontend/config/dev.env.js` | 纳入版本控制 | 本地端口对齐 |
-| `D:\Projects\svc.ps1`（不在本仓库内） | 新增短名 `sut`（端口 8021，工作目录 `D:\Projects\LunarLink\sut`，探测 `/health`）；`Get-Procs` 新增可选 `M`（命令行匹配串，支持数组 OR，定义后不再用 `D`）；为 `lunar-be` / `rag` / `kbapi` / `wht-be` / `wht-worker` 共 5 个服务设置 `M`；`kbapi` 的启动参数由 `server.py` 改为 `server.py --port 8020` | 让 SUT 与其他项目统一启停；**消灭「同 D 服务互相误杀 / 漏杀」这一类 bug**（共 3 组，详见第九节 9.5）。文件保持 UTF-8 with BOM |
+| `D:\Projects\svc.ps1`（不在本仓库内） | 新增短名 `sut`（端口 8021，工作目录 `D:\Projects\LunarLink\sut`，探测 `/health`）；`Get-Procs` 新增可选 `M`（命令行匹配串，支持数组 OR，定义后不再用 `D`）；为 `lunar-be` / `rag` / `kbapi` / `wht-be` / `wht-worker` / `llm` / `afa` 共 7 个服务设置 `M`（合计 9 条模式）；`kbapi` 的启动参数由 `server.py` 改为 `server.py --port 8020`；顶部注释补齐「`-like` 不是正则」「复用他人 venv 必须给被复用方设 `M`」两条约定 | 让 SUT 与其他项目统一启停；**消灭「同 D 服务互相误杀 / 漏杀」这一类 bug**（共 3 组，详见第九节 9.5、9.6）。文件保持 UTF-8 with BOM |
 
 ---
 
@@ -152,7 +157,11 @@
 
 | 简化点 | 说明 |
 |---|---|
-| **SUT 采用单 token 设计** | 真实系统应为「access token 短命 + refresh token 长命」双 token。为聚焦**测试场景本身**，SUT 简化为单 token（`/api/auth/refresh` 直接续签当前 token）。这是**有意简化**，不是遗漏 |
+| **SUT 采用单 token 设计** | 真实系统应为「access token 短命 + refresh token 长命」双 token。为聚焦**测试场景本身**，SUT 简化为单 token。这是**有意简化**，不是遗漏 |
+| **`logout` 是纯 no-op** | JWT 式无状态鉴权下，服务端不做主动失效才是诚实的。响应体明确返回 `token_revoked: false` 并附提示「请客户端自行丢弃本地 token」，**不假装服务端已失效**。代价：登出后旧 token 在自身过期前仍可用（测试已断言这一行为，避免把"错误预期"写成断言） |
+| **`refresh` 语义 = 旧换新** | `POST /api/auth/refresh` 用仍然有效的旧 token 换一个新 token，**不引入 refresh token** —— 后者会带出过期、轮换、重放等一连串问题，超出 mock 服务的目标。旧 token 不做轮换失效（已文档化并测试） |
+| **测试后门关闭时返回 404 而非 403** | 后门由 `SUT_ENABLE_TEST_HOOKS`（默认 off）控制是否**注册路由**。关闭时 `/api/_test/*` 返回 404 —— 用 403 会暴露"这里存在一个后门"，404 不泄露存在性（与"越权返 404"同一原则） |
+| **SUT 用 `Bearer`，LunarLink 用裸 token** | 两个契约**不同**，测试里必须区分：SUT 为 RFC 6750 风格 `Authorization: Bearer <token>`；LunarLink 的 `MyJWTAuthentication` 直接读 `HTTP_AUTHORIZATION` 原文，必须发裸 token（详见第 8 节）。这也是 `conftest.py` 要收一个 `auth_headers()` 单一入口的原因 |
 | SUT 用 `sqlite3` 标准库 + 手写 SQL | 不引入 SQLAlchemy，减少依赖与版本风险；SUT 的目的是提供**稳定的被测对象**，而非演示 ORM |
 | SUT 测试后门 | 仅测试环境开启，生产默认关闭（`SUT_ENABLE_TEST_HOOKS` 未设时不挂载路由） |
 | Allure HTML 本地渲染 | 本机无 JDK、无 allure CLI，且 `allure-commandline` 不在 PyPI、GitHub Release 通道受限。本地产出 `allure-results/` + `pytest-html` 兜底报告；Allure HTML 由 CI 生成并上传 artifact。**后续可选路径**：`allure-commandline` 发行包在 Maven Central 上（`io.qameta.allure:allure-commandline`），可用阿里云 Maven 镜像拉取，JDK 用清华/华为镜像 |
@@ -173,7 +182,7 @@
 | 服务启停 | `cd D:\Projects ; .\svc.ps1 start lunar-be,sut` |
 | 本地跑测试 | `cd lunarlink_tests ; ..\backend\.venv\Scripts\python.exe -m pytest --alluredir=allure-results --html=report.html --self-contained-html` |
 | 并行跑（产出"并行耗时"档） | 追加 `-n auto`（pytest-xdist） |
-| 回归冒烟账号 | 用户名 `smoke_regression` / 密码 `smoke123456`（`is_active=1`，非超管），由 `typing-extensions` 升级后的运行时回归引入，供阶段 2 平台冒烟套件复用 |
+| 回归冒烟账号 | 由 `python manage.py ensure_smoke_user` 幂等创建（非超管，供阶段 2 平台冒烟套件自举用）。**口令见该命令源码 / `SMOKE_PASSWORD` 环境变量，本文档不写明文** |
 | 后端认证头格式 | ★ `Authorization: <裸 token>`（**不带 `JWT ` 前缀**）—— `backend/utils/auth.py:MyJWTAuthentication` 直接把 `HTTP_AUTHORIZATION` 原文交给 `jwt_decode_handler`，实测带前缀会 401「签名解析失败」 |
 
 ---
@@ -306,3 +315,39 @@ pid=8136  python.exe    "D:\Python312\python.exe" "…\flowfile.exe" run ui --no
 `D`（`D:\Projects\Flowfile`）命中 **3/3** —— 因为它的 `Exe` 就在项目根目录下，三层命令行都含完整 Exe 路径。`stop flowfile` → `已停止 (3 个进程)`，残留 0。**结论：不需要 `M`。**
 
 **全表最终状态（18 个服务）**：`M` 已设 7 个（`lunar-be`、`rag`、`kbapi`、`wht-be`、`wht-worker`、`llm`、`afa`，共 9 条模式），其中 `wht-be` / `wht-worker` 是唯二的 2 模式数组（数组 OR 分支被真测）。每条 `M` 在「服务表区」内只命中所属服务的条目。
+
+### 9.7 SUT auth 模块的实测发现（第 7 个提交）
+
+验证方式：44 项断言的临时脚本，全部通过（脚本已删除，其断言将在阶段 2 落成 `test_01_auth.py`）。
+
+**★ pydantic v1 的宽松转换会让「类型不对 → 422」失效（真实踩到）**
+
+写 `password: str` 时，`POST /api/auth/register {"password": 123456}`（int）**被静默转成 `"123456"` 并通过校验，返回 201**。这与「422 = 参数格式错误（类型不对）」的状态码约定直接冲突。
+修复：请求模型改用 `StrictStr` / `StrictInt`，之后 int 类型入参稳定返回 **422 `VALIDATION_ERROR`**。
+
+**LunarLink 平台侧的对照实测（供阶段 2 写用例时对齐预期）**
+
+| 场景 | SUT（新） | LunarLink（平台） |
+|---|---|---|
+| 错误密码 | `401 BAD_CREDENTIALS` | **`400`**（`rest_framework_jwt` 默认行为，不是 401） |
+| 连续失败锁定 | 第 5 次 → `423 ACCOUNT_LOCKED` + `Retry-After` | **无任何锁定机制** |
+| 认证头 | `Authorization: Bearer <token>` | `Authorization: <裸 token>` |
+| 越权访问他人资源 | 计划返回 `404` | 待阶段 2 实测 |
+
+**锁定边界实测输出（逐条断言）**
+
+```
+第 1 次错误密码  HTTP 401  BAD_CREDENTIALS  failed_attempts=1
+第 2 次错误密码  HTTP 401  BAD_CREDENTIALS  failed_attempts=2
+第 3 次错误密码  HTTP 401  BAD_CREDENTIALS  failed_attempts=3
+第 4 次错误密码  HTTP 401  BAD_CREDENTIALS  failed_attempts=4
+第 5 次错误密码  HTTP 423  ACCOUNT_LOCKED   Retry-After=60     ← 此时才写 locked_until
+锁定期内用正确密码 HTTP 423  ACCOUNT_LOCKED   Retry-After=60     ← 密码对也不放行
+后门解锁 → 登录   HTTP 200
+先错 3 次→正确登录 HTTP 200；随后再错 4 次仍是 401（计数确实归零）
+锁定到期（拨库）→ 正确密码 200；随后第 1 次错误 → 401（计数归零，不是立刻 423）
+```
+
+**token 矩阵实测**：无头 `401` / 垃圾 token `401` / **裸 token（无 Bearer）`401`** / **篡改签名末字符 `401`（不是 500）** / 过期 token（后门 `ttl=-10`）`401 TOKEN_EXPIRED` / 后门签发的有效 token `200`。
+
+**其它**：`log_out` no-op 语义与 `refresh` 旧换新均已实测（见第七节）；`ensure_smoke_user` 幂等（连跑两次均为 `updated id=2`）、`SMOKE_PASSWORD` 环境变量优先生效、账号可真实登录成功（`POST /login/ → 200`，裸 token 访问 `/api/lunarlink/project → 200`）。

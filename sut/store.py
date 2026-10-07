@@ -205,3 +205,58 @@ def soft_delete_product(product_id: int) -> None:
 
 def count_products() -> int:
     return int(db.query_scalar("SELECT COUNT(*) FROM products") or 0)
+
+
+# ===================================================================== 登录凭证
+# 单 token 简化设计：token 落库，靠 expires_at / revoked 判定有效性。
+# 这样「过期」「登出失效」「任意 TTL」都能被确定性构造与断言
+# （后门 /api/_test/token 直接调用 create_token）。
+#
+# ★ 已弃用说明：revoked 列保留但当前不使用 —— logout 是纯 no-op 语义
+#   （JWT 无状态的诚实做法，见 README「设计简化说明」）。
+
+
+def create_token(user_id: int, ttl_seconds: Optional[int] = None) -> Dict[str, Any]:
+    """为用户签发 token。
+
+    ttl_seconds 允许为负数 —— 后门借此签发「一出生就已过期」的 token，
+    用于确定性验证过期分支，测试里不需要 sleep。
+    """
+    if ttl_seconds is None:
+        ttl_seconds = config.TOKEN_TTL_SECONDS
+
+    token = security.generate_token()
+    now = security.now_ts()
+    expires_at = now + int(ttl_seconds)
+
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO tokens (token, user_id, expires_at, revoked, created_at)"
+            " VALUES (?, ?, ?, 0, ?)",
+            (token, user_id, expires_at, now),
+        )
+
+    return {"token": token, "expires_at": expires_at, "issued_at": now}
+
+
+def get_token(token: str) -> Optional[Dict[str, Any]]:
+    if not token:
+        return None
+    return db.query_one("SELECT * FROM tokens WHERE token = ?", (token,))
+
+
+def revoke_token(token: str) -> None:
+    """保留能力：把 token 标记为失效。当前 logout 走 no-op 语义，未调用。"""
+    with db.transaction() as conn:
+        conn.execute("UPDATE tokens SET revoked = 1 WHERE token = ?", (token,))
+
+
+def count_tokens(user_id: Optional[int] = None) -> int:
+    if user_id is None:
+        return int(db.query_scalar("SELECT COUNT(*) FROM tokens") or 0)
+    return int(
+        db.query_scalar(
+            "SELECT COUNT(*) FROM tokens WHERE user_id = ?", (user_id,)
+        )
+        or 0
+    )

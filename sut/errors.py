@@ -71,9 +71,12 @@ class BizError(Exception):
         *,
         code: Optional[str] = None,
         status_code: Optional[int] = None,
+        headers: Optional[Dict[str, str]] = None,
     ) -> None:
         self.message = message or self.message
         self.detail = detail
+        # 额外响应头，如 423 账号锁定需要带 Retry-After（RFC 7231）
+        self.headers = headers
         if code is not None:
             self.code = code
         if status_code is not None:
@@ -130,11 +133,27 @@ class Conflict(BizError):
 
 
 class AccountLocked(BizError):
-    """423 —— 账号因连续登录失败被锁定。"""
+    """423 —— 账号因连续登录失败被锁定。
+
+    ★ 锁定期间即使提供【正确密码】也必须返回 423（不能因为密码对就放行），
+      并带 Retry-After 头告知还需等待多少秒（RFC 7231）。
+    """
 
     status_code = 423
     code = "ACCOUNT_LOCKED"
     message = "账号已被锁定，请稍后再试"
+
+    def __init__(
+        self,
+        retry_after: Optional[int] = None,
+        message: Optional[str] = None,
+        detail: Optional[Any] = None,
+    ) -> None:
+        headers = None
+        if retry_after is not None:
+            retry_after = max(int(retry_after), 1)
+            headers = {"Retry-After": str(retry_after)}
+        super().__init__(message, detail, headers=headers)
 
 
 # --------------------------------------------------------------------- 处理器
@@ -152,6 +171,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=exc.status_code,
             content=error_body(exc.code, exc.message, exc.detail),
+            headers=exc.headers,
         )
 
     @app.exception_handler(RequestValidationError)
