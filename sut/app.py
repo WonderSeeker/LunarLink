@@ -27,7 +27,7 @@ from fastapi import FastAPI
 
 from . import __version__, config, db
 from .errors import register_exception_handlers
-from .routers import auth, system
+from .routers import auth, cart, orders, payments, products, system
 
 
 def create_app() -> FastAPI:
@@ -52,6 +52,10 @@ def create_app() -> FastAPI:
 
     app.include_router(system.router)
     app.include_router(auth.router)
+    app.include_router(products.router)
+    app.include_router(cart.router)
+    app.include_router(orders.router)
+    app.include_router(payments.router)
 
     # 测试后门路由（/api/_test/*）只在 SUT_ENABLE_TEST_HOOKS=1 时挂载。
     if config.ENABLE_TEST_HOOKS:

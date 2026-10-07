@@ -65,7 +65,7 @@
 | 准备 | 切 `feat/pytest-refactor` 分支、修 `.gitignore`、建 `CHANGES.md` | ✅ 已完成 |
 | 阶段 1 | 摸清骨架：读 Django app 结构与 httprunner 内核，跑通「新建项目 → 新建用例 → 执行 → 看报告」，记录性能基线 | ✅ 链路已摸清（报告产出与基线数字待补） |
 | 阶段 2 | 用例层重构为 pytest + Requests + Allure（`lunarlink_tests/`） | 🚧 工程骨架 + 报告链路已通；业务用例待写 |
-| 阶段 3 | 业务测试套件（`sut/` mock 电商 + 100+ 用例，正常/异常/边界/并发/幂等/越权） | 🚧 SUT 骨架 + auth 模块已完成；商品/购物车/订单/支付待做 |
+| 阶段 3 | 业务测试套件（`sut/` mock 电商 + 100+ 用例，正常/异常/边界/并发/幂等/越权） | 🚧 SUT 已完整（24 路径 / 30 端点，并发防超卖与支付幂等均已实测）；pytest 用例待写 |
 | 阶段 4 | GitHub Actions 每日回归 + README（架构图 / 用例清单 / 耗时对比） | ⏳ 未开始 |
 
 ### 4.2 文件变更
@@ -93,6 +93,10 @@
 | `sut/routers/system.py` | `/health` 健康检查（数据库不可用返回 503） |
 | `sut/routers/test_hooks.py` | 测试后门（仅 `SUT_ENABLE_TEST_HOOKS=1` 时挂载）：`/api/_test/ping`、`/api/_test/token`（签发任意 TTL，**等价认证绕过**）、`/api/_test/user/{username}/unlock` |
 | `sut/routers/auth.py` | 认证模块：注册 / 登录（连续失败 5 次锁定 423 + Retry-After）/ 登出（纯 no-op）/ profile / refresh（旧换新） |
+| `sut/routers/products.py` | 商品模块：分页列表（边界校验）/ 详情 / 创建·更新·下架（admin）/ 库存查询 |
+| `sut/routers/cart.py` | 购物车模块：查看 / 加购（同商品数量合并，首次 201、合并 200）/ 改数量 / 移除 / 清空 |
+| `sut/routers/orders.py` | 订单模块：下单（★ 事务内条件更新防超卖）/ 列表 / 详情 / 状态 / 取消（回滚库存）/ 发货（admin）/ 确认收货 |
+| `sut/routers/payments.py` | 支付模块（范围收敛版）：创建支付单（同订单幂等复用）+ ★ 幂等回调 |
 | `lunarlink_tests/pytest.ini` | pytest 配置：显式钉 rootdir + markers 定义 |
 | `lunarlink_tests/conftest.py` | 最小 fixture：`sut_base_url` / `platform_base_url` / 会话级 `sut_ready`（未就绪用 `pytest.exit` 终止整轮） |
 | `lunarlink_tests/test_00_report_chain.py` | 工具链体检用例（5 条；业务用例从 `test_01_auth.py` 开始） |
@@ -351,3 +355,43 @@ pid=8136  python.exe    "D:\Python312\python.exe" "…\flowfile.exe" run ui --no
 **token 矩阵实测**：无头 `401` / 垃圾 token `401` / **裸 token（无 Bearer）`401`** / **篡改签名末字符 `401`（不是 500）** / 过期 token（后门 `ttl=-10`）`401 TOKEN_EXPIRED` / 后门签发的有效 token `200`。
 
 **其它**：`log_out` no-op 语义与 `refresh` 旧换新均已实测（见第七节）；`ensure_smoke_user` 幂等（连跑两次均为 `updated id=2`）、`SMOKE_PASSWORD` 环境变量优先生效、账号可真实登录成功（`POST /login/ → 200`，裸 token 访问 `/api/lunarlink/project → 200`）。
+
+### 9.8 商品 / 购物车 / 订单 / 支付幂等 实测（第 8 个提交）
+
+范围为**商品 + 购物车 + 订单**全量，支付只做「创建支付单 + 幂等回调」（按约定跳过超时补偿与退款）。
+一次性验证脚本 **82 项断言全部通过，0 失败**（脚本已删除，断言将在阶段 2/3 落成用例）。
+
+**SUT 最终接口规模**：24 条路径 / 30 个端点 = 26 业务 + 3 测试后门 + 1 健康检查。
+
+**★★ 并发实测（最核心的两条）**
+
+```
+5. 10 线程抢 5 件库存（同 SKU，各自购物车各 1 件，Barrier 同时发起下单）
+   成功(201) = 5    失败(409) = 5    其他 = []
+   最终库存（落库校验） = 0                 ← 无超卖、无多卖、无 5xx
+
+6. 20 线程同一 notify_id 并发回调
+   首次入账(duplicated=False) = 1    幂等命中(duplicated=True) = 19    异常 = []
+   payment_callbacks 行数（落库校验） = 1   ← 唯一约束闸门生效，只入账一次
+```
+
+**关键设计（均已被断言覆盖）**
+
+| 点 | 实现 | 断言 |
+|---|---|---|
+| 防超卖 | 事务内单条 `UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?`，靠 `rowcount` 判定；抛错则整个事务回滚 | 并发恰好 5 成功 / 5 失败 / 库存归零 |
+| 取消回滚库存 | 取消时按 `order_items` 反向 `stock = stock + qty` | 取消后库存回到下单前 |
+| 订单状态机 | 白名单 `config.ORDER_STATE_TRANSITIONS`；非法流转 409 + `detail.from/to/allowed` | `PENDING→COMPLETED` 409、`CANCELLED→CANCELLED` 409、`COMPLETED→CANCELLED` 409、`PAID→SHIPPED→COMPLETED` 200 |
+| 水平越权 | 订单/支付单/购物车条目一律先按 `user_id` 过滤，查不到即 404 | 查/取消/确认/发货/创建支付单他人订单 → 404 |
+| 垂直越权 | `require_admin` → 403 | 普通用户创建商品 / 发货 → 403 |
+| 支付幂等 | `payment_callbacks.notify_id` **UNIQUE** 做闸门；重复回调捕获 `IntegrityError` → 返回首次结果且**不改任何字段** | 重复回调后 `paid_at` / `amount_paid_cents` 不变、`payment_callbacks` 仍 1 行 |
+| 分页边界 | `page<1` / `size<1` / `size>100` → 400；`page` 超大 → 200 空列表 | 区分「参数非法」与「无数据」 |
+| 加购合并 | `cart_items` 的 `UNIQUE(user_id, product_id)` + 事务内读-判-写 | 首次 201、重复 200 且数量合并；合并后超库存 409 |
+
+**两处对原设计的偏差（需知悉）**
+
+1. **新增了 `POST /api/orders/{order_no}/ship`（admin 发货）** —— 原设计 6 个订单接口里没有它，
+   但 `SHIPPED` 状态将不可达，`confirm`（`SHIPPED→COMPLETED`）永远无法成功、状态机测不完整。
+   这是必要的补充，不是擅自扩范围。
+2. **支付模块只实现了 `POST /api/payments`、`GET /api/payments/{pay_no}`、`POST /api/payments/{pay_no}/callback`** ——
+   按约定跳过超时补偿与退款；`GET` 是为了能断言越权 404 与简化断言而保留的。

@@ -90,6 +90,18 @@ def require_auth(
     return {"user": user, "token": token, "token_row": row}
 
 
+def require_admin(principal: Dict[str, Any] = Depends(require_auth)):
+    """在 require_auth 基础上要求 admin 角色。
+
+    ★ 这里返回 403（而不是 404）：这是【垂直越权】—— 接口本身的存在性不是秘密，
+      明确告知"权限不够"更有助于调用方定位问题。
+      对比：【水平越权】（访问他人的订单/支付单）返回 404，因为要隐藏资源是否存在。
+    """
+    if principal["user"]["role"] != config.ROLE_ADMIN:
+        raise errors.Forbidden("需要管理员权限")
+    return principal
+
+
 # --------------------------------------------------------------------- 辅助
 
 
