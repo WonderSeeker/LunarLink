@@ -260,3 +260,49 @@ wht-wk  M2 '-A wharttest_django worker'   -> 3 个 [12628,32256,27544]
 **遗留的同类隐患（本次未改，等你决定）**
 
 `llm` 未设 `M`，用 `D` 匹配。实测它的 `D`（`D:\Projects\WHartTest\llm-server`）**只命中 1 个进程**（父），派生出的子进程 `"D:\Python312\python.exe" server.py --port 11434 --dtype bfloat16` 命令行里不含该路径 → **漏杀**。目前靠 `Port = 11434` 兜住，暂无实际故障。若要与 wht-worker 同样稳妥，可加 `llm → 'server.py --port 11434'`（已验证该串在服务表内唯一）。本次按「减少改动面」原则未动。
+
+### 9.6 补齐 `llm` / `afa`，并实测 `flowfile`（第 6 个提交）
+
+**① `llm` 补 M —— 目的是「规则单一化」而非「怕出事」**
+
+实测进程树与匹配集合：
+
+```
+pid=34640  "...\llm-server\.venv\Scripts\python.exe" server.py --port 11434 --dtype bfloat16
+pid=33444  "D:\Python312\python.exe"                server.py --port 11434 --dtype bfloat16
+
+候选 M 'server.py --port 11434' -> 2 个 [34640, 33444]   ✓ 父子都覆盖
+旧 D 'WHartTest\llm-server'       -> 1 个 [34640]         ✗ 漏子进程
+```
+
+`llm` 原本是**唯一**同时靠 D 和 Port 两条规则、且 D 对子进程失效的服务 —— 「一个服务有一部分进程只被端口规则兜住」正是这类 bug 的温床。补 M 后父子两层同源。
+
+⚠️ 口径诚实性：`stop llm` 修复前后**都报 2 个进程**（修复前 D 命中 1 + 端口兜 1，修复后 M 命中 2），所以**计数不能作为 M 生效的证据**，真正证据是上面的模式命中矩阵。
+
+**② `afa` 补 M —— 确认是 P2 潜伏缺陷，不是活跃故障**
+
+实测进程树（3 层，与 `rag` 同形状）：
+
+```
+pid=15016 streamlit.exe  "…\Automated-Fundamental-Analysis\.venv\Scripts\streamlit.exe" run app.py --server.port 8503 …
+pid=23864 python.exe     "…\.venv\Scripts\python.exe" "…\streamlit.exe" run app.py …
+pid=9992  python.exe     "D:\Python310\python.exe" "…\streamlit.exe" run app.py …
+```
+
+- `afa` 旧 `D`（`…\Automated-Fundamental-Analysis\WebApp`）命中 **0 个** —— `D` 指向 `\WebApp`，而 `Exe` 在 `\.venv`，两者不相交
+- ✅ 但 `stop afa` 在修复前**也没有残留**：杀掉端口持有者（孙进程）后整条 launcher 链**级联自己退出**。所以它"看起来正常"靠的是**进程拓扑的巧合**，不是设计保证 → 定级 **P2 潜伏缺陷**
+- 修复后：`stop afa` → `已停止 (3 个进程)`（修复前只声明 1 个），8503 释放、残留 0
+
+**③ `flowfile` 实测 —— 无缺陷（不是第二个 wht-worker）**
+
+全表唯一 `Port = 0` 且原本无 `M` 的服务（零兜底）。实测进程树也是 3 层：
+
+```
+pid=16752 flowfile.exe  "D:\Projects\Flowfile\.venv\Scripts\flowfile.exe" run ui --no-browser
+pid=21388 python.exe    "…\.venv\Scripts\python.exe" "…\flowfile.exe" run ui --no-browser
+pid=8136  python.exe    "D:\Python312\python.exe" "…\flowfile.exe" run ui --no-browser
+```
+
+`D`（`D:\Projects\Flowfile`）命中 **3/3** —— 因为它的 `Exe` 就在项目根目录下，三层命令行都含完整 Exe 路径。`stop flowfile` → `已停止 (3 个进程)`，残留 0。**结论：不需要 `M`。**
+
+**全表最终状态（18 个服务）**：`M` 已设 7 个（`lunar-be`、`rag`、`kbapi`、`wht-be`、`wht-worker`、`llm`、`afa`，共 9 条模式），其中 `wht-be` / `wht-worker` 是唯二的 2 模式数组（数组 OR 分支被真测）。每条 `M` 在「服务表区」内只命中所属服务的条目。
