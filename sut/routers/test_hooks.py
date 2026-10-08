@@ -83,3 +83,32 @@ def unlock_user(username: str):
 
     store.unlock_user(user["id"])
     return {"code": "OK", "username": username, "failed_attempts": 0, "locked_until": 0}
+
+
+@router.post(
+    "/user/{username}/expire_lock",
+    summary="把锁定时间拨到过去（但保留失败计数）",
+    description=(
+        "★ 用于确定性验证「锁定自然到期」分支，替代 sleep(锁定时长)。\n\n"
+        "与 /unlock 的区别：\n"
+        "  /unlock      -> 失败计数与 locked_until 一起清零（验证「管理员解锁」）\n"
+        "  /expire_lock -> 只把 locked_until 拨到过去，保留 failed_attempts=5\n"
+        "                  （验证「锁定到期后计数归零、重新开窗口」这段业务逻辑）\n\n"
+        "不做这个区分的话，「到期」用例就只能靠 sleep，或者随启动参数被 skip 掉。"
+    ),
+)
+def expire_lock(username: str):
+    user = store.get_user_by_username(username)
+    if user is None:
+        raise errors.NotFound(
+            "用户不存在", code="USER_NOT_FOUND", detail={"username": username}
+        )
+
+    store.expire_lock(user["id"])
+    refreshed = store.get_user_by_username(username)
+    return {
+        "code": "OK",
+        "username": username,
+        "failed_attempts": int(refreshed["failed_attempts"] or 0),
+        "locked_until": int(refreshed["locked_until"] or 0),
+    }

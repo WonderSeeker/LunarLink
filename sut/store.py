@@ -251,6 +251,23 @@ def revoke_token(token: str) -> None:
         conn.execute("UPDATE tokens SET revoked = 1 WHERE token = ?", (token,))
 
 
+def expire_lock(user_id: int) -> None:
+    """★ 把 locked_until 拨到过去，但【故意保留 failed_attempts】。
+
+    用途：让「锁定自然到期」这条分支也能被确定性验证，测试里不需要
+    sleep(锁定时长)。如果这里顺手把 failed_attempts 也清零，就绕过了
+    「到期后计数归零」这段业务逻辑，那正是用户想断言的部分。
+
+    保留 failed_attempts=5 + locked_until=过去时刻，正好命中登录里的
+    「锁定已到期 -> 计数归零 -> 重新开窗口」分支。
+    """
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE users SET locked_until = ? WHERE id = ?",
+            (security.now_ts() - 1, user_id),
+        )
+
+
 def count_tokens(user_id: Optional[int] = None) -> int:
     if user_id is None:
         return int(db.query_scalar("SELECT COUNT(*) FROM tokens") or 0)

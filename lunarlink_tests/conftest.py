@@ -42,12 +42,30 @@ from utils.db import SutDatabase  # noqa: E402
 #   一旦用 pytest -n 2，每个 worker 是独立进程 → 各自 reset → 互相把对方数据重置掉；
 #   而且 SUT 的 RESET_BUSY 守卫会把另一个 worker 的 reset 打成 409 → fixture 直接报错。
 #   不加守卫的失败方式是【间歇性 flaky】（最难查），加了就是显式报错 + 说明。
-if os.environ.get("PYTEST_XDIST_WORKER"):
-    pytest.exit(
-        "本套件依赖「共享同一个 SUT 进程 + 会话级 reset」，不支持 xdist 并行。\n"
-        "去掉 -n/--dist 参数，或为每个 worker 提供独立的 SUT 实例（不同端口 + 不同 DB）。",
-        returncode=1,
-    )
+#
+#   ★ 为什么写在 pytest_configure 里、而不是 conftest 顶层：
+#     在 conftest 导入阶段抛 pytest.exit，pytest 会把它包成 ConftestImportFailure
+#     并附一整段 traceback，把 CI 日志搅浑；而这条错误本该一眼看懂。
+#
+#   ★ 又为什么不直接写在 pytest_configure 里就完事（实测教训）：
+#     裸着写会让【每个 worker 都执行一次】，报错信息被打印 11 次，还附带
+#     "bringing up nodes" 与 10 行 "[gwN] node down: Not properly terminated"，比原来更糟。
+#     所以要显式区分主进程与 worker：
+#       - hasattr(config, "workerinput") == True  -> 我是 worker，闭嘴，交给主进程报
+#       - config.getoption("numprocesses") 有值    -> 主进程带了 -n，这里一次性报错退出
+#     实测（`pytest -n 2`）：只输出 1 条 Exit 信息，无 traceback、无 node down 噪音。
+
+
+def pytest_configure(config):
+    if hasattr(config, "workerinput"):
+        return  # 本进程是 xdist worker，不重复报错
+
+    if config.getoption("numprocesses", None) or os.environ.get("PYTEST_XDIST_WORKER"):
+        pytest.exit(
+            "本套件依赖「共享同一个 SUT 进程 + 会话级 reset」，不支持 xdist 并行。\n"
+            "去掉 -n/--dist 参数，或为每个 worker 提供独立的 SUT 实例（不同端口 + 不同 DB）。",
+            returncode=1,
+        )
 
 DEFAULT_SUT_BASE_URL = "http://127.0.0.1:8021"
 DEFAULT_PLATFORM_BASE_URL = "http://127.0.0.1:8001"

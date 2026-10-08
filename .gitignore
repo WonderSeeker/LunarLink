@@ -18,10 +18,11 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-# 测试报告产物（allure-results 是 CI artifact 输入，allure-report / report.html 是渲染结果）
+# 测试报告产物（allure-results 是 CI artifact 输入，allure-report / report*.html 是渲染结果）
 allure-results/
 allure-report/
-report.html
+report*.html
+junit.xml
 
 # 本地数据库（后端 SQLite 与 SUT SQLite，CI 中分别由 migrate 与 sut/seed.py 重建）
 /backend/lunarlink.sqlite3

@@ -194,24 +194,34 @@ class TestLockout:
     @allure.title("★ 锁定自然到期后可登录，且计数重新开始（不立刻再锁）")
     @pytest.mark.security
     def test_lock_expires_naturally(self, sut, fresh_buyer):
-        for _ in range(4):
-            _login(sut, fresh_buyer["username"], "wrong")
-        locked = _login(sut, fresh_buyer["username"], "wrong")
-        assert locked.status_code == 423
-        retry_after = int(locked.headers["Retry-After"])
+        """用后门把 locked_until 拨到过去，而不是 sleep。
 
-        if retry_after > 5:
-            pytest.skip(
-                "锁定时长 {}s 过长，无法在用例内等待。"
-                "请以 AUTH_LOCK_SECONDS=2 启动 SUT 后重跑（见 CHANGES.md）".format(retry_after)
-            )
+        ★ 这里刻意【不用】 sleep(Retry-After)，也不用 AUTH_LOCK_SECONDS 把锁定时长调小：
+          前者慢且受机器负载影响，后者会让本用例随「SUT 的启动方式」而 skip ——
+          那样得到的绿色是环境相关的，不是代码相关的。
+          后门 /api/_test/user/{username}/expire_lock 只拨时间、保留 failed_attempts，
+          正好命中「锁定已到期 → 计数归零 → 重新开窗口」这段业务逻辑。
+        """
+        username = fresh_buyer["username"]
+        for _ in range(5):
+            _login(sut, username, "wrong")
 
-        time.sleep(retry_after + 1)
-        assert _login(sut, fresh_buyer["username"], fresh_buyer["password"]).status_code == 200
+        # 先确认此刻确实是锁着的
+        still_locked = _login(sut, username, fresh_buyer["password"])
+        assert still_locked.status_code == 423, "前置条件不成立：账号没有被锁定"
 
-        # 到期后计数应归零：第 1 次错误是 401 而不是立刻 423
-        again = _login(sut, fresh_buyer["username"], "wrong")
-        assert again.status_code == 401, "锁定到期后计数未归零"
+        # 拨时间（保留失败计数）
+        hook = sut.post("/api/_test/user/{}/expire_lock".format(username))
+        assert hook.status_code == 200, hook.text[:200]
+        assert hook.json()["failed_attempts"] == 5, "后门应保留失败计数，否则就绕过了要验证的逻辑"
+        assert hook.json()["locked_until"] > 0
+
+        # 到期后正确密码可登录
+        assert _login(sut, username, fresh_buyer["password"]).status_code == 200
+
+        # 且计数确实归零：第 1 次错误是 401（而不是立刻又 423）
+        again = _login(sut, username, "wrong")
+        assert again.status_code == 401, "锁定到期后计数未归零，一错就又锁上了"
         assert again.json()["detail"]["failed_attempts"] == 1
 
 

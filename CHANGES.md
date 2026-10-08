@@ -64,9 +64,9 @@
 |---|---|---|
 | 准备 | 切 `feat/pytest-refactor` 分支、修 `.gitignore`、建 `CHANGES.md` | ✅ 已完成 |
 | 阶段 1 | 摸清骨架：读 Django app 结构与 httprunner 内核，跑通「新建项目 → 新建用例 → 执行 → 看报告」，记录性能基线 | ✅ 链路已摸清（报告产出与基线数字待补） |
-| 阶段 2 | 用例层重构为 pytest + Requests + Allure（`lunarlink_tests/`） | 🚧 工程骨架 + 报告链路已通；业务用例待写 |
-| 阶段 3 | 业务测试套件（`sut/` mock 电商 + 100+ 用例，正常/异常/边界/并发/幂等/越权） | ✅ SUT 完整（25 路径 / 31 端点）+ **175 条用例全绿**（174 passed / 1 故意 skip） |
-| 阶段 4 | GitHub Actions 每日回归 + README（架构图 / 用例清单 / 耗时对比） | ⏳ 未开始 |
+| 阶段 2 | 用例层重构为 pytest + Requests + Allure（`lunarlink_tests/`） | ✅ 工程与报告链路完成（工具链体检 8 条全绿） |
+| 阶段 3 | 业务测试套件（`sut/` mock 电商 + 100+ 用例，正常/异常/边界/并发/幂等/越权） | ✅ SUT 完整（26 路径 / 32 端点，含 4 个测试后门）+ **175 条用例全绿**（174 passed / 1 故意 skip） |
+| 阶段 4 | GitHub Actions 每日回归 + README（架构图 / 用例清单 / 耗时口径） | 🚧 workflow 与 README 已完成并本地逐条验证；**待你在 Actions 页面手动触发一次确认**；平台冒烟套件未做 |
 
 ### 4.2 文件变更
 
@@ -91,7 +91,9 @@
 | `sut/seed.py` | 种子数据脚本（`--reset` 一键重建；商品库存刻意覆盖 0 / 1 / 3 等并发边界） |
 | `sut/routers/__init__.py` | 路由包 |
 | `sut/routers/system.py` | `/health` 健康检查（数据库不可用返回 503） |
-| `sut/routers/test_hooks.py` | 测试后门（仅 `SUT_ENABLE_TEST_HOOKS=1` 时挂载）：`/api/_test/ping`、`/api/_test/token`（签发任意 TTL，**等价认证绕过**）、`/api/_test/user/{username}/unlock` |
+| `sut/routers/test_hooks.py` | 测试后门（仅 `SUT_ENABLE_TEST_HOOKS=1` 时挂载）：`/api/_test/ping`、`/api/_test/token`（签发任意 TTL，**等价认证绕过**）、`/api/_test/user/{username}/unlock`、`/api/_test/user/{username}/expire_lock`（只拨锁定时间、保留失败计数） |
+| `.github/workflows/daily-regression.yml` | 每日回归：定时 + 手动触发，起 SUT → pytest → Allure HTML → 上传 artifact |
+| `README.md` | 追加 12 节测试体系说明（架构图 / 用法 / 用例清单 / 分层耗时实测 / 设计简化说明） |
 | `sut/routers/auth.py` | 认证模块：注册 / 登录（连续失败 5 次锁定 423 + Retry-After）/ 登出（纯 no-op）/ profile / refresh（旧换新） |
 | `sut/routers/products.py` | 商品模块：分页列表（边界校验）/ 详情 / 创建·更新·下架（admin）/ 库存查询 |
 | `sut/routers/cart.py` | 购物车模块：查看 / 加购（同商品数量合并，首次 201、合并 200）/ 改数量 / 移除 / 清空 |
@@ -555,6 +557,8 @@ test_concurrent_same_notify_id -> 并发回调结果 => 首次入账=1  幂等�
 **★ 防 xdist 并行守卫（阶段 4 会踩的坑，提前挡住）**
 
 `conftest.py` 顶部：检测到 `PYTEST_XDIST_WORKER` 就 `pytest.exit`。
+（★ 该守卫的位置在第 12 个提交里又改了一次 —— 挪到 `pytest_configure` 并区分主进程/worker，
+原因见 9.12 第 ② 条：裸写会让 11 个 worker 各报一次。）
 原因：`sut_seeded` 是 session 级 + 整会话只 reset 一次，隐含「所有用例共享同一个 SUT 进程」。
 一旦 `pytest -n 2`，每个 worker 独立进程 → 各自 reset → 互相重置对方数据，
 而且 `RESET_BUSY` 守卫会把另一个 worker 的 reset 打成 409 → fixture 直接报错。
@@ -575,6 +579,107 @@ _pytest.config.ConftestImportFailure: Exit: 本套件依赖「共享同一个 SU
 并有一条用例 `test_whitelist_matches_implementation` **逐条对着实现验证**（合法的断言 200、
 非法的断言 409）。这样本地副本与 `sut/config.py` 的漂移会立刻暴露，而不是让矩阵变成装饰。
 `REFUNDED` 刻意不写进矩阵 —— 本次跳过了退款，该状态不可达，写进去就是假断言。
+
+### 9.12 阶段 4：CI + README，以及测量过程中揪出的 3 个问题（第 12 个提交）
+
+#### ① 我报错的一条事实：`llm` 的「环境已复原」
+
+上一轮汇报我写「只保留你原本在跑的 `llm`（HTTP 200）」，核对时发现 11434 无监听。
+我最后一次检查时它确实是 `YES/HTTP 200`，之后掉线 —— 但 `_logs/llm.err` 已被重启覆盖，
+**我无法证明死因，所以不编**。
+
+真正的教训不是"llm 为什么挂"，而是**"环境已复原"这句话必须是汇报时刻的实测值**，
+不能拿几分钟前的快照当结论。本轮起改为：**所有操作做完后、写汇报之前，重新实测一次环境**，
+并在汇报里写清"实测时刻"。
+
+#### ② xdist 守卫按建议挪到 `pytest_configure` —— 实测比原来更糟，于是改了第二版
+
+你批准「挪到 `pytest_configure`，避免 `ConftestImportFailure` + traceback 污染 CI 日志」。
+挪完实测 `pytest -n 2`：
+
+```
+  bringing up nodes...
+  Exit: 本套件依赖「共享同一个 SUT 进程 + 会话级 reset」，不支持 xdist 并行。   × 11 次
+  [gw0] node down: Not properly terminated                                  × 10 行
+```
+
+**原因**：`pytest_configure` 在 xdist 下**每个 worker 都会执行**，所以报错被打印了 11 次，
+还多了 node down 噪音 —— 比原来的单次 `ConftestImportFailure` 更差。
+
+第二版显式区分主进程与 worker：
+
+```python
+def pytest_configure(config):
+    if hasattr(config, "workerinput"):
+        return  # 本进程是 xdist worker，不重复报错
+    if config.getoption("numprocesses", None) or os.environ.get("PYTEST_XDIST_WORKER"):
+        pytest.exit("…", returncode=1)
+```
+
+**实测结果**：输出 8 行、**只有 1 条 Exit 信息**、无 traceback、无 node down、exit code = 1 ✅。
+
+> 教训：你给的判断方向是对的（顶层报错确实脏），但**"哪个钩子里报"必须实测**——
+> xdist 下钩子的执行次数与进程模型强相关，靠推理会得出错误结论。
+
+#### ③ 「锁定自然到期」用例会随启动方式静默 skip —— 已改为后门驱动
+
+测量全量耗时的时候发现：
+
+```
+SKIPPED [1] test_01_auth.py:204: 锁定时长 60s 过长，无法在用例内等待。
+                                 请以 AUTH_LOCK_SECONDS=2 启动 SUT 后重跑
+```
+
+即这道用例**是否执行取决于 SUT 怎么启动的**（我在测量时没带 `AUTH_LOCK_SECONDS`）。
+这是一种「环境相关的绿色」，与我们早已立下的「用后门消除 sleep」原则相矛盾。
+
+**修法**：新增后门 `POST /api/_test/user/{username}/expire_lock` ——
+只把 `locked_until` 拨到过去、**故意保留 `failed_attempts=5`**，正好命中
+「锁定已到期 → 计数归零 → 重新开窗口」这段业务逻辑。
+
+> 为什么不复用手边的 `/unlock`：它会把失败计数一起清零，等于**绕过**了要验证的那段逻辑；
+> 用它来测「到期后计数归零」是假断言。
+
+改完后 `test_01_auth.py` 独立跑：**33 passed, 0 skipped**，不再依赖任何环境变量。
+`AUTH_LOCK_SECONDS` 配置项保留（业务参数仍可调），但**测试套件不再依赖它**。
+
+#### ④ 耗时对比：按你的要求**不做** HttpRunner 对比，改为同引擎分层标记
+
+采纳你的三条理由（引擎不同导致差值无法归因 / 建等量用例成本高 / 素材已经更强）。
+README 里明确写了「**不用这个数字去和上游比快了多少倍**」，并说明原因是口径不可比。
+
+替代口径（同一台机器、同一条命令形态，各采样 3 次取中位数）：
+
+| 命令 | 条数 | 3 次采样（秒） | 中位数 |
+|---|---|---|---|
+| `pytest -m smoke --alluredir --html` | 26 | 6.57 / 6.66 / 7.14 | **6.7s** |
+| `pytest --alluredir --html`（全量） | 175 | 29.20 / 30.39 / 34.23 | **30.4s** |
+
+口径：含**会话级 reset 一次**与 **Allure 附件写入**，不含 SUT 启动时间。
+结论表述为「分层标记提供分级反馈通道（提交前跑 26 条 ≈ 7 秒，全量交给 CI）」，
+并加了一句防止过度解读：这个价值**随套件规模增长而放大**，冒烟集大小是有意收敛的。
+
+#### ⑤ 阶段 4 产出
+
+| 文件 | 内容 |
+|---|---|
+| `.github/workflows/daily-regression.yml` | 每日 UTC 18:00 + 手动触发；起 SUT（带后门）→ 轮询 `/health` → pytest → Allure HTML → 上传 artifact |
+| `README.md`（追加 12 节） | 改造动机 / 架构图 / 目录结构 / 快速开始 / 用例清单 / 4 层断言体系 / 分层耗时实测 / 四个重点机制 / 设计简化说明 / CI / 平台冒烟（标注未完成）/ 编码约定 |
+
+**CI 的三个刻意选择**（都写进了 workflow 注释）：
+
+1. 生成 Allure HTML **不加 `|| true`** —— 报告流水线坏掉本来就该是红的，
+   加了会出现「测试全绿但报告悄悄没了」这种最坏情况。
+2. marker 为空时**不传 `-m`** —— `-m ""` 在部分 pytest 版本会被当成非法表达式。
+3. 未使用 `simple-elf/allure-report-action`（虽然你建议用现成 Action）——
+   已核实它是 `using: docker`、9 个必填入参、且以「部署 gh-pages + 保留历史」为目标；
+   我们要的只是一份可下载 HTML。改用官方 `allure-commandline`（runner 预装 Node/Java），
+   每一行都可在本地推理验证，避免引入无法在本地验证的第三方依赖。
+   Action 的确切入参已写在注释里，你想换回来只需替换 5 行。
+
+> ⚠️ 诚实声明：workflow 的 YAML 语法、`seed.py --reset`、`run.py` 就绪探测、
+> `--junitxml` 与 pytest-html 同时使用，**都在本地逐条实跑验证过**；
+> 但**尚未在 GitHub Actions 上真实触发**。首次请手动 Run workflow 确认。
 
 **两处对原设计的偏差（需知悉）**
 
