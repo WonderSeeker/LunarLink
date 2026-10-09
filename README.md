@@ -232,7 +232,8 @@ LunarLink/
 │   ├── conftest.py               # 分层 fixture + 防 xdist 并行守卫
 │   ├── utils/                    # client / db / schema / data
 │   ├── schemas/                  # 响应体 JSON Schema（金额一律约束为 integer）
-│   └── test_00…test_08*.py       # 175 条用例
+│   ├── test_00…test_08*.py       # 业务套件 175 条（测 sut/）
+│   └── test_09_lunarlink_smoke.py  # 平台冒烟 26 条（测 backend/，platform marker）
 ├── backend/requirements-test.txt # 测试依赖（与后端 requirements.txt 完全隔离）
 └── .github/workflows/daily-regression.yml
 ```
@@ -240,8 +241,13 @@ LunarLink/
 ## 4. 快速开始
 
 ```powershell
-# 1) 起被测系统（自动打开测试后门；只绑 127.0.0.1）
-cd D:\Projects ; .\svc.ps1 start sut
+# 1) 起两个被测对象（sut 会自动打开测试后门；都只绑 127.0.0.1）
+cd D:\Projects ; .\svc.ps1 start sut,lunar-be
+
+# 1b) 仅平台冒烟（test_09）需要：准备平台数据库与冒烟账号（幂等，可重复执行）
+cd D:\Projects\LunarLink\backend
+..\.venv\Scripts\python.exe manage.py migrate
+..\.venv\Scripts\python.exe manage.py ensure_smoke_user
 
 # 2) 跑全量并产出两份报告
 cd D:\Projects\LunarLink\lunarlink_tests
@@ -249,17 +255,23 @@ cd D:\Projects\LunarLink\lunarlink_tests
 
 #    → 人眼看 report.html（自包含，双击即可）
 #    → allure-results/ 可在 CI 或装了 allure CLI 的机器上生成可视化报告
+#    ★ allure-results/ 是【累积】写入的，想知道本次跑了多少条要先清空它：
+#      Remove-Item allure-results -Recurse -Force
 
 # 3) 只跑冒烟（提交前自检）
 ..\backend\.venv\Scripts\python.exe -m pytest -m smoke
 
+# 3b) 只跑平台冒烟 / 只跑业务套件
+..\backend\.venv\Scripts\python.exe -m pytest -m platform
+..\backend\.venv\Scripts\python.exe -m pytest -m "not platform"
+
 # 4) 用完停掉
-cd D:\Projects ; .\svc.ps1 stop sut
+cd D:\Projects ; .\svc.ps1 stop sut,lunar-be
 ```
 
 ★ 必须用 `python -m pytest`（而不是裸 `pytest`），确保用的是 `backend/.venv` 的解释器。
 
-## 5. 用例清单（175 条）
+## 5. 用例清单（201 条 = 业务套件 175 + 平台冒烟 26）
 
 | 文件 | 条数 | 覆盖内容 |
 |---|---|---|
@@ -272,10 +284,15 @@ cd D:\Projects ; .\svc.ps1 stop sut
 | `test_06_flow_e2e.py` | 4 | 主链路 / 取消链路 / 库存不足回滚链路 / 双用户并发链路（带 `allure.step`） |
 | `test_07_concurrency.py` | 6 | **★ 防超卖**、**★ 支付幂等并发**、并发加购合并不丢更新、库存上限保护 |
 | `test_08_security.py` | 18 | 水平越权 404、垂直越权 403、token 矩阵、信息泄露、参数注入 |
-| **合计** | **175** | 174 passed + 1 skipped（唯一 skip 是刻意用来验证 skip 呈现的用例） |
+| **业务套件小计** | **175** | 174 passed + 1 skipped（唯一 skip 是刻意用来验证 skip 呈现的用例） |
+| `test_09_lunarlink_smoke.py` | 26 | **平台冒烟**（另一个被测对象）：认证头契约、只读端点信封、业务错误码、权限边界、轻量写闭环、3 条已知缺陷 xfail |
+| **合计** | **201** | 197 passed + 1 skipped + 3 xfailed |
 
-**场景类型分布**（按 marker 统计，一条用例可带多个标记）：`security` 35 / `negative` 29 /
-`smoke` 26 / `regression` 23 / `boundary` 13 / `concurrency` 6。
+**场景类型分布**（按 marker 统计，一条用例可带多个标记）：`security` 40 / `negative` 36 /
+`smoke` 33 / `regression` 23 / `boundary` 13 / `concurrency` 6 / `platform` 26。
+
+> `test_09` 被测的是 **LunarLink 平台自身**（8001），与前 9 个文件（测 `sut/`）是**两个不同对象**，
+> 因此单独用 `platform` marker 统计，`-m platform` / `-m "not platform"` 可分别执行。
 
 ## 6. 断言体系（4 层递进）
 
@@ -297,7 +314,13 @@ cd D:\Projects ; .\svc.ps1 stop sut
 | 命令 | 条数 | 墙钟时间（3 次采样） | 中位数 |
 |---|---|---|---|
 | `pytest -m smoke` | 26 | 6.57s / 6.66s / 7.14s | **6.7s** |
-| `pytest`（全量） | 175 | 29.20s / 30.39s / 34.23s | **30.4s** |
+| `pytest`（全量，含平台冒烟） | 201 | 27.38s / 31.42s / 34.23s | **31.4s** |
+| `pytest -m "not platform"`（仅业务套件） | 175 | 29.20s / 30.39s / 34.23s | **30.4s** |
+
+> ⚠️ 诚实记录：其中有一次全量运行出现 **999.70s 与 1 条 broken**，之后连续复跑均正常
+> （最长单测 1.23s）。SUT 日志里没有任何 `database is locked` / Traceback / 5xx 证据，
+> **我无法解释那一次，也不编原因**；已作为待观察项记录在本仓库的 CHANGES.md。
+> CI 侧靠 `timeout-minutes: 15` 兜住这类挂起。
 
 口径说明：计时包含 **会话级数据重置**（`POST /api/system/reset`，整个会话只做一次）
 与 **Allure 附件写入**（每次请求/响应都 attach，便于失败排障）。不含 SUT 启动时间。
@@ -349,9 +372,22 @@ MVCC 数据库（MySQL InnoDB / PostgreSQL）下的竞争表现**。它们真正
 
 `.github/workflows/daily-regression.yml`：**每日 UTC 18:00（北京 02:00）自动跑 + 支持手动触发**。
 
-流程：检出 → 装 Python 3.10 + 测试依赖 → `python sut/seed.py --reset` 重建数据 →
-后台起 SUT（带 `SUT_ENABLE_TEST_HOOKS=1`）→ 轮询 `/health` 就绪 → 执行 pytest →
-生成 Allure HTML → 上传 artifact（Allure 报告 + pytest-html + `junit.xml` + SUT 日志）。
+流程：检出 → 装 Python 3.10 + 测试依赖 → `python sut/seed.py --reset` 重建 SUT 数据 →
+后台起 SUT（带 `SUT_ENABLE_TEST_HOOKS=1`）→ 轮询 `/health` 就绪 →
+**`cp .env.example .env` + `manage.py migrate` + `ensure_smoke_user`** →
+后台起平台（`runserver 127.0.0.1:8001 --noreload`）→ 轮询就绪 → 执行 pytest（201 条）→
+生成 Allure HTML → 上传 artifact（Allure 报告 + pytest-html + `junit.xml` + 两个服务的日志）。
+
+平台侧的三个必设项（都是实测踩出来的，缺一项 CI 就会红）：
+
+| 设置 | 为什么 |
+|---|---|
+| `cp .env.example .env` | `backend/.env` 被 gitignore（CI 里不存在），而 `conf/env.py` 在 import 期执行 `PROXY_PORT = int(os.getenv("PROXY_PORT"))`，**无默认值**，缺它 Django 根本起不来 |
+| `DATABASE_ENGINE=sqlite` | `settings.py` 里它默认是 `mysql`；CI 没有 MySQL |
+| `REDIS_ON=False` / `PROXY_ON=False` | `.env.example` 里是 `True`（本地 `.env` 是 `False`），不覆盖就会去连本地不存在的 Redis / 录制代理 |
+
+> `load_dotenv()` 默认**不覆盖**已存在的环境变量，所以 job 级 `env:` 的优先级高于 `.env`
+> —— 这一点已在本机实测确认，不是照文档推断的。
 
 两个刻意的选择：
 
@@ -365,13 +401,35 @@ MVCC 数据库（MySQL InnoDB / PostgreSQL）下的竞争表现**。它们真正
 
 ## 11. 平台冒烟套件（Platform Smoke）
 
-上游平台自身的 API 冒烟（登录 → 项目/接口/用例 CRUD → 报告查询）计划独立成
-`test_09_lunarlink_smoke.py`，并单独用 `platform` marker 统计，与业务套件分开计数。
+`test_09_lunarlink_smoke.py`，26 条，用 `platform` marker 单独统计 ——
+它测的是**平台自身**（8001），与测 `sut/` 的业务套件是两个被测对象。
 
-- 只做**只读 + 轻量写**，**不碰 `run_testsuite_pk` 这类会真正拉起 HttpRunner 执行测试的接口**
-  （它慢且不稳定，会把冒烟套件拖垮）
-- 需要 `lunar-be` 在 8001 运行且 `DATABASE_ENGINE=sqlite`；未满足时该组用例 **skip 而不是 fail**
-- 状态：**未完成**（本仓库当前只包含业务套件）
+**范围纪律**：只做**只读 + 轻量写**，**不碰 `run_api` / `run_testsuite` / `run_suite_tree` 这类
+会真正拉起 HttpRunner 执行用例的接口**（慢且不稳定，会把冒烟套件拖垮）。
+平台没起来时整组 **skip 而不是 fail** —— 它是辅助套件，不该阻断业务回归。
+
+**执行前需要**：`lunar-be` 在 8001 运行 + `DATABASE_ENGINE=sqlite` + 冒烟账号
+
+```powershell
+cd backend
+python manage.py migrate
+python manage.py ensure_smoke_user      # 幂等：建非管理员账号 + 管理员账号
+```
+> 单跑 `test_09` **不需要 SUT**（已实测：8021 未监听时 26 条照样跑完，1.25s）。
+
+### 顺手实测出来的平台问题（都已固定成断言）
+
+| 现象 | 结论 |
+|---|---|
+| **认证头是裸 token** | 加 `Bearer ` 前缀 → 401 `签名解析失败`。与 RFC 6750 不符，但这是实际契约（前端也这么发），见 `utils/client.py` 注释。已锁成断言，实现一变就报错 |
+| **业务错误用 HTTP 200 表达** | `GET /project/999999` → **200** + `{"code":"0102","success":false}`。所以只断状态码的用例在这里会"假通过"，必须双层断言 |
+| **`POST /project` 要求 `desc` 与 `responsible`** | 二者是 `CharField(null=False)` 且无 `default`/`blank` → ModelSerializer 里成为必填。只传 `name` 会得到 `{"code":"9999","msg":"System Error"}` |
+| ★ **缺字段时报 `9999 System Error`** | 不说是哪个字段、也不回 400，调用方只能翻源码。已写成断言并注明"这不是预期行为"，上游改进后会失败提醒 |
+| ★ **3 个端点在 SQLite 下必定 500** | `/dashboard`、`/visit`、`/reports` —— 上游 `utils/prepare.py` 与 `VisitView` 用了 `DATE_FORMAT` / `YEARWEEK` 等 **MySQL 专有 SQL**。用 `xfail(strict=True)` 显式记录 |
+| **`ENABLE_LOGIN_ANALYSIS_LOG` 是死配置** | `conf/env.py` 把它**硬编码为 `True`**，不读环境变量，`.env` 里写 `False` 无效。它会让 `/api/user/login` 每次登录都去调外部 IP 归属地 API（timeout 5s）。本套件统一走 `/login/`（DRF-JWT），**不经过那段调用**，所以不受影响 |
+
+> 关于 `xfail(strict=True)` 的写法：用例体断言的是**正确行为（200）**，不是"应该 500"。
+> 方向写反会变成 `XPASS(strict)` 报错 —— 我第一版就写反了，实测才发现。
 
 ## 12. 本地环境与编码约定
 

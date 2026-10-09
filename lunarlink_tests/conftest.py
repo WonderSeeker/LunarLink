@@ -81,8 +81,12 @@ SEED_BUYER2 = "buyer2"
 SEED_BUYER_PASSWORD = "buyer123"
 
 # 平台冒烟账号（由 backend manage.py ensure_smoke_user 保证存在）
+#   1) 非管理员账号：主力，用于只读 + 权限边界
 PLATFORM_SMOKE_USER = os.getenv("SMOKE_USERNAME", "smoke_regression")
 PLATFORM_SMOKE_PASSWORD = os.getenv("SMOKE_PASSWORD", "smoke123456")
+#   2) 管理员账号：仅用于 admin-only 端点（CustomIsAdminUser 查 is_staff）
+PLATFORM_ADMIN_USER = os.getenv("SMOKE_ADMIN_USERNAME", "smoke_admin")
+PLATFORM_ADMIN_PASSWORD = os.getenv("SMOKE_ADMIN_PASSWORD", "smoke123456")
 
 
 def _base_url(env_key: str, default: str) -> str:
@@ -289,41 +293,89 @@ def sut_db(sut_ready: dict) -> SutDatabase:
 
 
 @pytest.fixture(scope="session")
-def platform() -> ApiClient:
-    """LunarLink 平台客户端。
+def platform(platform_base_url: str) -> ApiClient:
+    """LunarLink 平台的【匿名】客户端。
 
-    ★ 注意 token_style 用 TOKEN_STYLE_LUNARLINK（裸 token）——
+    ★ token_style 用 TOKEN_STYLE_LUNARLINK（裸 token）——
       与 SUT 的 Bearer 不同，见 utils/client.py 顶部说明。
+
+    ★ 本 fixture 永远不持有 token，也【不允许被别处改写】。原因见下方
+      `_platform_client` 的说明（原来这里被 platform_admin 改写，是个隐患）。
     """
     return ApiClient(
-        _base_url("LUNARLINK_BASE_URL", DEFAULT_PLATFORM_BASE_URL),
+        platform_base_url,
         token=None,
         token_style=TOKEN_STYLE_LUNARLINK,
-        name="platform",
+        name="platform-匿名",
+    )
+
+
+def _platform_client(
+    base_url: str, username: str, password: str, name: str
+) -> ApiClient:
+    """登录平台并返回一个【独立】的客户端；平台不可用/账号缺失时 skip。
+
+    ★ 为什么不复用 session 级 platform 再改它的 token（原实现如此）：
+      那样「platform 到底带不带 token」取决于 fixture 的实例化顺序，
+      于是「未登录访问受保护接口 -> 401」这类用例会时对时错。
+      order-dependent 的 flaky 最耗排查时间，所以每个身份各自新建客户端。
+
+    ★ 平台属于【可选的辅助套件】，因此这里用 skip 而不是像 sut_ready 那样
+      pytest.exit：平台没起来不应该阻断业务套件的回归。
+    """
+    try:
+        resp = requests.post(
+            base_url + "/login/",
+            json={"username": username, "password": password},
+            timeout=20,
+        )
+    except requests.RequestException as exc:  # noqa: BLE001
+        pytest.skip(
+            "LunarLink 平台不可用（{}）：{}\n"
+            "请先执行：cd D:\\Projects ; .\\svc.ps1 start lunar-be".format(base_url, exc)
+        )
+        raise  # pragma: no cover - 仅为类型收窄
+
+    if resp.status_code != 200 or "token" not in resp.json():
+        pytest.skip(
+            "平台冒烟账号 {} 登录失败（HTTP {}）。请先执行："
+            "cd backend ; python manage.py ensure_smoke_user".format(
+                username, resp.status_code
+            )
+        )
+
+    allure.attach(
+        "username={} token_style={}".format(username, TOKEN_STYLE_LUNARLINK),
+        "平台登录",
+        allure.attachment_type.TEXT,
+    )
+    return ApiClient(base_url, resp.json()["token"], TOKEN_STYLE_LUNARLINK, name=name)
+
+
+@pytest.fixture(scope="session")
+def platform_user(platform_base_url: str) -> ApiClient:
+    """平台的【非管理员】冒烟客户端（主力）。
+
+    用于：只读端点可用性 + 权限边界（断言 403）。
+    """
+    return _platform_client(
+        platform_base_url,
+        PLATFORM_SMOKE_USER,
+        PLATFORM_SMOKE_PASSWORD,
+        "platform-非管理员",
     )
 
 
 @pytest.fixture(scope="session")
-def platform_admin(platform: ApiClient) -> ApiClient:
-    """已登录的平台客户端（供平台冒烟套件使用）。
+def platform_admin(platform_base_url: str) -> ApiClient:
+    """平台的【管理员】冒烟客户端（is_staff 为真）。
 
-    依赖 `manage.py ensure_smoke_user` 已创建账号；账号不存在时 skip，
-    而不是报一个看不懂的失败。
+    仅用于 admin-only 端点（例：删除项目）。有了它，写用例才能自己清理现场，
+    把「只剩脏数据」这种问题从源头去掉。
     """
-    resp = platform.post(
-        "/login/",
-        json={"username": PLATFORM_SMOKE_USER, "password": PLATFORM_SMOKE_PASSWORD},
+    return _platform_client(
+        platform_base_url,
+        PLATFORM_ADMIN_USER,
+        PLATFORM_ADMIN_PASSWORD,
+        "platform-管理员",
     )
-    if resp.status_code != 200:
-        pytest.skip(
-            "平台冒烟账号登录失败（HTTP {}）。请先执行："
-            "cd backend ; python manage.py ensure_smoke_user".format(resp.status_code)
-        )
-
-    platform.token = resp.json()["token"]
-    allure.attach(
-        "username={} token_style={}".format(PLATFORM_SMOKE_USER, TOKEN_STYLE_LUNARLINK),
-        "平台登录",
-        allure.attachment_type.TEXT,
-    )
-    return platform
