@@ -1,4 +1,6 @@
 /backend/venv
+# ★ 修正：实际虚拟环境目录名是 .venv（原规则写的是 /backend/venv，名字不符，导致 .venv 一直被提交）
+/backend/.venv/
 /backend/.idea
 /web/.idea
 
@@ -9,3 +11,19 @@
 
 *.sh
 docker-compose-prod.yml
+
+# ==================== 测试改造新增（pytest + Allure + mock SUT） ====================
+# Python 产物
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 测试报告产物（allure-results 是 CI artifact 输入，allure-report / report*.html 是渲染结果）
+allure-results/
+allure-report/
+report*.html
+junit.xml
+
+# 本地数据库（后端 SQLite 与 SUT SQLite，CI 中分别由 migrate 与 sut/seed.py 重建）
+/backend/lunarlink.sqlite3
+/sut/*.sqlite3

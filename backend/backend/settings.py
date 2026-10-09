@@ -92,19 +92,30 @@ WSGI_APPLICATION = "backend.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/2.2/ref/settings/#databases
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.mysql",
-        "NAME": DATABASE_NAME,
-        "USER": DATABASE_USER,
-        "PASSWORD": DATABASE_PASSWORD,
-        "HOST": DATABASE_HOST,
-        "PORT": DATABASE_PORT,
-        "OPTIONS": {
-            "charset": "utf8mb4",  # 设置字符集为utf8mb4
-        },
+# 通过 DATABASE_ENGINE 环境变量切换数据库：默认 mysql（生产），本地开发可设为 sqlite 免装 MySQL
+DATABASE_ENGINE = os.getenv("DATABASE_ENGINE", "mysql")
+
+if DATABASE_ENGINE == "sqlite":
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": os.path.join(BASE_DIR, "lunarlink.sqlite3"),
+        }
     }
-}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.mysql",
+            "NAME": DATABASE_NAME,
+            "USER": DATABASE_USER,
+            "PASSWORD": DATABASE_PASSWORD,
+            "HOST": DATABASE_HOST,
+            "PORT": DATABASE_PORT,
+            "OPTIONS": {
+                "charset": "utf8mb4",  # 设置字符集为utf8mb4
+            },
+        }
+    }
 
 # Password validation
 # https://docs.djangoproject.com/en/2.2/ref/settings/#auth-password-validators

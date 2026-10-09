@@ -1,4 +1,5 @@
 import collections
+import collections.abc
 import csv
 import importlib
 import io
@@ -584,7 +585,7 @@ def _convert_validators_to_mapping(validators):
     for validator in validators:
         validator = parser.parse_validator(validator)
 
-        if not isinstance(validator["check"], collections.Hashable):
+        if not isinstance(validator["check"], collections.abc.Hashable):
             check = json.dumps(validator["check"])
         else:
             check = validator["check"]
