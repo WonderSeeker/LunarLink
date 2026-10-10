@@ -41,13 +41,19 @@ on:
         description: "只跑某个 marker（留空 = 全量）"
         required: false
         default: ""
+  push:
+    branches: [main]
+    # 纯文档改动不触发回归（省的浪费 Actions 配额；public 仓库虽免费但没必要）
+    paths-ignore:
+      - "**.md"
+      - "screenshots/**"
 
 permissions:
   contents: read
 
 jobs:
   regression:
-    name: 接口回归（SUT 175 条）
+    name: 接口回归（SUT 175 条 + 平台冒烟 26 条）
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -60,13 +66,32 @@ jobs:
         with:
           python-version: "3.10"
           cache: pip
-          cache-dependency-path: backend/requirements-test.txt
+          cache-dependency-path: |
+            backend/requirements-test.txt
+            backend/requirements.txt
 
       - name: 安装测试依赖
         run: |
           python -m pip install --upgrade pip
-          # ★ 只装测试依赖；backend/requirements.txt 是后端运行环境，CI 不需要
+          # 测试套件自己的依赖（pytest / requests / allure / jsonschema / mock SUT）
           pip install -r backend/requirements-test.txt
+          pip list
+
+      - name: 安装平台运行时依赖
+        run: |
+          # ★ 本 job 里既有 SUT 套件（175 条）也有平台冒烟（test_09，26 条），
+          #   所以平台（Django）也必须能起来 —— 后面会跑 manage.py migrate 与 runserver。
+          #
+          #   backend/requirements.txt 是平台的运行时依赖，但它含 mysqlclient==2.1.1：
+          #   在 ubuntu runner 上编译它需要 libmysqlclient-dev（默认没有）。
+          #   而 CI 用的是 DATABASE_ENGINE=sqlite，根本不需要这个驱动 —— 先剔除再装。
+          #   若将来要把 CI 切到 MySQL，则改为：
+          #     sudo apt-get install -y default-libmysqlclient-dev pkg-config
+          #   然后直接 pip install -r backend/requirements.txt
+          grep -v -iE '^\s*mysqlclient' backend/requirements.txt > /tmp/requirements-platform.txt
+          echo "--- 已剔除 mysqlclient 后的行数 ---"
+          wc -l < /tmp/requirements-platform.txt
+          pip install -r /tmp/requirements-platform.txt
           pip list
 
       - name: 重建 SUT 数据库并灌种子数据
