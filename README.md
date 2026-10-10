@@ -404,12 +404,17 @@ push 到 main 时跑**（纯文档与 `screenshots/**` 改动不触发）。
   实测把两者装进同一环境后连 `sut/seed.py --reset` 都会失败（依赖集冲突）。
 - **生成 Allure HTML 后不加 `|| true`**：报告流水线坏掉本来就该是红的；
   加了会出现「测试全绿但报告悄悄没了」这种最坏情况。
-- **失败时把 pytest 尾部 40 行发成 GitHub annotation；成功时把用例统计写进 `GITHUB_STEP_SUMMARY`**：
-  workflow 运行日志的下载接口需要认证（匿名请求会被 403），而 annotation 与 step summary
-  在公开仓库上**可匿名读取**（summary 还会直接渲染在 run 页面）——
-  这样没有仓库权限的排查者不登录也能看到失败摘要与用例统计。
-  另一半考虑是：**把「跳过了多少」变成公开事实**。skipped 数量本身就是警示信号 ——
-  后门没开会让绝大多数用例 skip，那正是"假的绿色"的典型形态。
+- **让 CI 的结论对匿名读者可核实**（刻意设计，不是顺手加的）：
+  workflow 运行日志与产物的下载接口**都需要认证**（匿名请求 403），所以：
+  - **失败时** → 把 pytest 尾部 40 行发成 **annotation**：annotation 可匿名读取
+    （`GET /repos/{owner}/{repo}/check-runs/{id}/annotations`）。
+  - **成功时** → 把用例统计**同时**写进 **`GITHUB_STEP_SUMMARY`**（渲染在 run 页面，人眼看）
+    和一条 **notice annotation**（可匿名 API 读取）。
+    ★ 两者**互补而非替代**：summary 好看但只能人眼看；annotation 不好看但可被程序与第三方核实。
+    （实测依据：`level=notice` 的注解同样能匿名读到；而 step summary 的内容**不在任何 API 里**，
+    `check-runs.output.summary` 是空的。）
+  - 另一半考虑：**把「跳过了多少」变成公开事实**。skipped 数量本身就是警示信号 ——
+    后门没开会让绝大多数用例 skip，那正是"假的绿色"的典型形态。
 
 > ★ 已实测通过：**run #5 `conclusion=success`**（仓库：https://github.com/WonderSeeker/LunarLink）。
 > 该次运行由仓库所有者触发。

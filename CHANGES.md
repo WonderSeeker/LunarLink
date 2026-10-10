@@ -1073,6 +1073,71 @@ SUT 未开启测试后门（GET /api/_test/ping -> HTTP 404）。
 | 全量 / 后门关闭 | exit 1，且**只有**守卫 1 条 FAILED |
 | 平台库存活项目 | 0（写用例自清理有效） |
 
+### 9.17 让 CI 结论可匿名核实（notice annotation）+ 记录两个决定（第 19 个提交）
+
+#### ① 状态：全部核实通过
+
+仓库所有者独立复核：`origin/main = b7980f6`（0/0、工作区干净）、`run #7 = success`
+（由 API 自己读到，不靠转述）、`PYTHONIOENCODING`(L67)、`GITHUB_STEP_SUMMARY`(L215-221)、
+`platform_ready` 闸门（conftest + test_09 的 `pytestmark`）、后门守卫的 docstring 与实测依据、
+README 的「（当时）」与「别信文档里冻结的数字」。
+
+#### ② 决定：**不做**「独立 platform job」
+
+理由（采纳仓库所有者的判断，记下来避免以后重复讨论）：
+
+1. **成本高、收益低**：要处理 `mysqlclient` / `libmysqlclient-dev` / 完整 Django 运行时 /
+   两个 env 坑，而收益只是把**公开可见**的覆盖率从 175 扩到 201 ——
+   没有人看着这个数字做决定。
+2. **它已经不是问题了**：26 条本地跑通 + step summary 已声明它不在 CI + 两个坑写进 workflow 注释。
+3. **它是"可选加分项"，不是缺陷**：加它只会让 CI 更复杂，不会让项目更强。
+
+#### ③ ★ 我发现的一个真实缺口：「summary 无法被第三方核实」
+
+仓库所有者请我打开 run #7 页面确认 `### 用例统计` 区块。**我做不到**，而且这次是**实测**了三条路径：
+
+| 尝试 | 结果 |
+|---|---|
+| `web_fetch` run #7 页面 | `Request timed out after 10000ms`（与仓库所有者遇到的一致） |
+| step summary 走 API | **不存在该端点**；`check-runs.output.summary` 为空字符串 |
+| 产物 / 运行日志下载 | 401（需认证） |
+
+**含义**：step summary 虽然"公开可读"，却**只对人眼可读** —— 任何程序化/第三方核实都拿不到它。
+这与我们一直在追求的"让结论可被独立核实"是**不一致的**。
+
+**修法（11 行，互补而非替代）**：把统计同时发成一条 **notice annotation**。
+依据是这次读注解时的实测发现：**`level=notice` 的注解同样能匿名读取**
+（我就是用 `GET /check-runs/{id}/annotations` 读到 GitHub 那条 ubuntu 迁移提示的）。
+
+**本地预演**（bash 按 LF 抽出脚本真实执行）：
+
+```
+总计 201 条
+  passed   197
+  skipped  4
+pytest-html: 180261 bytes
+::notice::CI 用例统计 —— 总计 201 条 passed 197 skipped 4 pytest-html: 180261 bytes
+bash exit code = 0
+```
+
+**同时修掉我上一轮的一处不准确表述**：我在 README 里写过
+「annotation 与 step summary 在公开仓库上**可匿名读取**」——
+但 summary 的**内容走 API 根本读不到**（这一步刚被实测证伪）。
+已改写为「**两者互补而非替代**：summary 好看但只能人眼看；annotation 不好看但可被程序与第三方核实」。
+
+#### ④ 顺带发现（**未处理**，仅记录）
+
+读注解时读到一条 GitHub 平台提示：
+
+```
+warning: Node.js 20 is deprecated. The following actions target Node.js 20 but are being
+forced to run on Node.js 24: actions/checkout@v4, actions/setup-python@v5, actions/upload-artifact@v4
+```
+
+**严重度低**（GitHub 会自动把它们跑在 Node 24 上，CI 目前全绿），**我没有动版本号**：
+`@v5`/`@v6` 这些标签具体存在与否我没有核实，靠猜去改很可能直接把 CI 改红 ——
+那比留着一条 warning 更糟。要处理的话，正确顺序是**先查这些 action 的可用大版本，再改**。
+
 **两处对原设计的偏差（需知悉）**
 
 1. **新增了 `POST /api/orders/{order_no}/ship`（admin 发货）** —— 原设计 6 个订单接口里没有它，

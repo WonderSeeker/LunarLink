@@ -211,6 +211,17 @@ jobs:
           PY
           )
           echo "$STATS"
+
+          # ★ 同时发成 notice annotation，与 step summary 是【互补】而不是替代：
+          #     - step summary：渲染在 run 页面，人眼看得到，但【只能人眼看】
+          #     - annotation  ：在 public 仓库上【可匿名读取】（实测 level=notice 也读得到），
+          #                     即 `GET /repos/{owner}/{repo}/check-runs/{id}/annotations`
+          #   为什么要两个都要：产物与运行日志的下载都要认证（401），
+          #   所以「CI 到底跑了多少条」若只存在于页面/日志里，第三方就无法核实。
+          #   发成 notice 后，任何人（包括没有仓库权限的）都能用 API 核到这几个数字。
+          COMPACT=$(echo "$STATS" | tr '\n' ' ' | tr -s ' ')
+          echo "::notice::CI 用例统计 —— ${COMPACT}"
+
           {
             echo "### 用例统计"
             echo '```'
