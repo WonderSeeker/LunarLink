@@ -857,12 +857,13 @@ MySQL 专有 SQL，导致 SQLite 模式下返回 500」，不再写成"平台有
 # 1) 在 github.com 上 fork（或新建）自己的仓库 —— 这一步也需要 github.com 可达
 # 2) 把 push 目标换成自己的仓库，保留 upstream 做归属
 cd D:\Projects\LunarLink
-git remote set-url origin https://github.com/<你的账号>/LunarLink.git
+git remote set-url origin https://github.com/WonderSeeker/LunarLink.git
 git remote add upstream https://ghproxy.net/https://github.com/tahitimoon/LunarLink.git
 
-# 3) 推送（此时 main 已含全部 15 个提交）
+# 3) 推送（main 已含全部改造提交）
 git push -u origin main
-git push origin feat/platform-smoke        # 可选：保留分支供 PR 叙事
+# 注：两个特性分支（feat/pytest-refactor、feat/platform-smoke）都已并入 main，
+#     不必单独推送 —— 「PR 叙事」要靠「先开 PR 再合并」才能留痕，推死分支做不到。
 
 # 4) 推送后在 GitHub 的 Actions 页面手动触发一次 Run workflow 确认
 ```
