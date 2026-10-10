@@ -212,12 +212,33 @@
 
 ## 九、踩坑与约定记录（★ 防复发）
 
-### 9.1 文本文件编码：两类文件两套规则
+### 9.1 文本文件编码：★ 三分法（同一个 quirk 会从两个相反方向咬人）
+
+> 本节在 9.19 之后由「两类文件两套规则」**升级为三分法** —— 因为原来只写了
+> 「`.ps1` 必须有 BOM」，却漏了**反向**的那一半（有些文件必须**没有** BOM），
+> 而漏掉的那一半正好造成了 9.19 那次事故。**歧义规则等于没有规则**。
+> README 第 12 节也放了同一张表（那是面向使用者的规范位置）。
 
 | 谁读这个文件 | 要求 | 原因 |
 |---|---|---|
+| **PowerShell 5.1**（`.ps1` 脚本） | ★ **必须有 BOM** | PS 5.1 不认 PEP263，只会按 ANSI（中文系统 = GBK）读，非 ASCII 字符会导致乱码甚至语法错误。`D:\Projects\svc.ps1` 与 `sut\run-sut.ps1` 均已校验 `BOM=True` |
 | **Python**（`requirements-*.txt`、`.py` 源码等） | PEP263 coding 声明 或 UTF-8 BOM 都行 | pip 23.0.1 的 `auto_decode()` 在**既无 BOM 又无 coding 声明**时退回 `locale.getpreferredencoding()`；中文 Windows 下 locale 是 GBK，于是含中文注释的依赖文件直接 `UnicodeDecodeError: 'gbk' codec can't decode byte 0x80`。已在 `backend/requirements-test.txt` 第 1 行加 `# -*- coding: utf-8 -*-` 解决 |
-| **PowerShell 5.1**（`.ps1` 脚本） | ★ **必须 BOM** | PS 5.1 不认 PEP263，只会按 ANSI（中文系统 = GBK）读，非 ASCII 字符会导致乱码甚至语法错误。`D:\Projects\svc.ps1` 与 `sut\run-sut.ps1` 均已校验 `BOM=True` |
+| **其它一切文本**（commit message / `.md` / `.json` / `.yaml` / `.csv`…） | ★ **必须没有 BOM** | BOM 会被当成**内容的第一个字符**（不是"元数据"）。实例：`git commit -F <文件>` 把 BOM 当成标题首字符 → `\ufeffdocs: …`，见 9.19 |
+
+**★ 写文件的 API 必须显式选（永远别用 `Set-Content -Encoding UTF8`）**：
+PS 5.1 的这个取值**总是写 BOM**，这正是 9.19 事故的根因。
+
+```powershell
+# 要 BOM（.ps1）：
+[IO.File]::WriteAllText($p, $t, (New-Object Text.UTF8Encoding($true)))
+# 不要 BOM（commit message / .md / .json …）：
+[IO.File]::WriteAllText($p, $t, (New-Object Text.UTF8Encoding($false)))
+# PowerShell 7 也可：Set-Content -Path $p -Value $t -Encoding utf8NoBOM
+```
+
+> 记法：**`.ps1` 要 BOM，其它都不要**；而且**两边的默认值都是错的**
+> （PS 5.1 `Set-Content -Encoding UTF8` 默认**加** BOM，Python `open()` 默认**不加**），
+> 所以不能靠默认，必须显式指定。
 
 ### 9.2 `svc.ps1` 的服务复用约定（连带影响已修）
 
@@ -1201,6 +1222,76 @@ forced to run on Node.js 24: actions/checkout@v4, actions/setup-python@v5, actio
 - 所以缺口从**「未知」缩小到「很可能没问题，但没验」**。
   **结论不变**（当前停在 v6，不影响任何事）。将来真要升 v7 时，
   先按上表第 4 条路径确认 3.10 仍在构建，再决定是升 v7 还是把 CI 与 venv 一起迁到 3.11/3.12。
+
+### 9.19 把 BOM 事故升级成规则 + 两处表述修正（第 22 个提交）
+
+#### ① 事故本身：提交标题带了 BOM
+
+第 21 个提交（`1e12d5a`）的标题首字符是 `U+FEFF`：
+
+```
+repr = b'\xef\xbb\xbfdocs: 缩小 9.18 的证…'      # 239,187,191 = UTF-8 BOM
+```
+
+**根因是我自己偏离了流程**：前面 20 个提交都用文件写入工具生成消息文件（无 BOM），
+这次图省事换成了 PowerShell 的 `Set-Content -Encoding UTF8` ——
+而 **PS 5.1 的这个取值总是写 BOM**，`git commit -F` 就把它当标题第一个字符。
+
+> 仓库所有者独立复核：扫最近 25 个提交，**BOM 只有 1 个**（就是 HEAD 那个），
+> 并实测 `Set-Content -Encoding UTF8` 写出的文件首 3 字节 = `239,187,191` → 根因成立。
+
+**实际影响（唯一的）**：锚定搜索会漏 —— `git log --grep='^docs:'` 匹配不上；
+不带 `^` 的搜索正常。**功能、CI、内容零影响。**
+
+#### ② ★ 决定不修：不是「危险」，而是「收益为零」
+
+**先说结论**：不改写已发布的 `main`、不强推。
+
+仓库所有者给了一处**更精确的表述**，我采纳并记在这里：
+**单人仓库用 `--force-with-lease` 其实是安全的**（没人拉过那段历史），
+所以这**不是"危险"而是"收益为零"**。两个理由都成立，且第二个更准确 ——
+以后遇到同类判断，应该用"收益 vs 成本"而不是一律用"危险"来表述。
+
+#### ③ 升级成规则：同一个 quirk 从**两个相反方向**咬人
+
+本次最有价值的产出不是"修好这个 BOM"，而是**发现原来的约定有歧义**：
+`CHANGES` 9.1 与 `README` 第 12 节原先都只写了「`.ps1` **必须**有 BOM」，
+**却漏了反向的那一半**（有些文件**必须没有** BOM）—— 而漏掉的一半正好造成了这次事故。
+
+**已把两处都改成三分法**（`CHANGES` 9.1 / `README` §12），并补上"写文件的 API 必须显式选"：
+
+| 文件 | 要求 |
+|---|---|
+| `.ps1`（PS 5.1 读） | ★ **必须有** BOM |
+| `requirements-*.txt` / `.py`（Python 读） | PEP263 声明或 BOM 均可 |
+| commit message / `.md` / `.json` / `.yaml` … | ★ **必须没有** BOM |
+
+```powershell
+# 要 BOM：       [IO.File]::WriteAllText($p,$t,(New-Object Text.UTF8Encoding($true)))
+# 不要 BOM：     [IO.File]::WriteAllText($p,$t,(New-Object Text.UTF8Encoding($false)))
+# PS 7 也可：    Set-Content -Path $p -Value $t -Encoding utf8NoBOM
+```
+
+**★ 永远不要用 `Set-Content -Encoding UTF8`** —— 它就是这次事故的根因。
+
+> 一句话记法：**`.ps1` 要 BOM，其它都不要**；且**两边的默认值都是错的**
+> （PS 5.1 默认**加** BOM，Python `open()` 默认**不加**），所以不能靠默认，必须显式指定。
+
+#### ④ 修正上一轮我对「证据缺口」的方法论（仓库所有者建议，采纳）
+
+原记录只说了"失败的四条路径"，但没提炼出**下次该走哪条**。已补进 9.18②：
+
+> **要确认某个 Python 版本是否还在维护，先查 `actions/python-versions` 的 releases API，
+> 不要去拉 `manifest`。**
+> 依据：manifest 体积大，`Invoke-WebRequest` 60s 超时、`web_fetch` 10s 硬超时、`curl` SSL 报错，
+> 三条路径全撞墙；而 **releases API 一次就成了**（100 个 release 里有 9 个 3.10.x）。
+
+#### ⑤ 归档
+
+```
+1e12d5a docs: 缩小 9.18② 的证据缺口 —— python-versions 仍在构建 3.10（最新 3.10.22，2026-10-01）
+```
+（本行即那个带 BOM 的标题。**我不改写历史**，所以它保持原样留在这里作为记录。）
 
 **两处对原设计的偏差（需知悉）**
 

@@ -495,9 +495,25 @@ python manage.py ensure_smoke_user      # 幂等：建非管理员账号 + 管�
 & 'D:\Projects\LunarLink\backend\.venv\Scripts\python.exe' -m pip install -r backend/requirements-test.txt
 ```
 
-两个容易踩的编码坑（都已踩过并记录）：
+### 编码约定（★ 同一个 quirk 会从**两个相反方向**咬人，所以是三分法）
 
 | 谁读该文件 | 要求 | 原因 |
 |---|---|---|
-| **Python**（`requirements-*.txt`、`.py`） | PEP263 coding 声明 `# -*- coding: utf-8 -*-` 或 UTF-8 BOM 均可 | pip 23.0.1 的 `auto_decode()` 在既无 BOM 又无 coding 声明时，会用系统 locale（中文 Windows = GBK）解码依赖文件，中文注释会触发 `UnicodeDecodeError` |
-| **PowerShell 5.1**（`.ps1`） | ★ **必须 UTF-8 with BOM** | PS 5.1 不认 PEP263，会按 GBK 读，非 ASCII 字符直接导致语法错误 |
+| **PowerShell 5.1**（`.ps1`） | ★ **必须有 BOM** | PS 5.1 不认 PEP263，只会按 ANSI（中文系统 = GBK）读；非 ASCII 字符会乱码甚至直接语法错误 |
+| **Python**（`requirements-*.txt`、`.py` 等） | PEP263 声明 `# -*- coding: utf-8 -*-` 或 BOM 均可 | pip 23.0.1 的 `auto_decode()` 在**既无 BOM 又无 coding 声明**时退回系统 locale（中文 Windows = GBK）→ 含中文注释就 `UnicodeDecodeError` |
+| **其它一切文本**（commit message / `.md` / `.json` / `.yaml` / `.csv`…） | ★ **必须没有 BOM** | BOM 会被当成**内容的第一个字符**。实例：`git commit -F <文件>` 会把 BOM 当成提交标题的首字符（本项目曾因此产生一个 `\ufeffdocs: …` 的标题） |
+
+**怎么写（★ 永远不要用 `Set-Content -Encoding UTF8`）**：PowerShell 5.1 的这个取值**总是写 BOM**，
+这也是上面那个 BOM 事故的根因。正确写法只有这三种：
+
+```powershell
+# 需要 BOM（.ps1 等）：
+[IO.File]::WriteAllText($p, $t, (New-Object Text.UTF8Encoding($true)))
+# 不需要 BOM（commit message / .md / .json …）：
+[IO.File]::WriteAllText($p, $t, (New-Object Text.UTF8Encoding($false)))
+# PowerShell 7 里也可以：
+Set-Content -Path $p -Value $t -Encoding utf8NoBOM
+```
+
+> 一句话记法：**`.ps1` 要 BOM，其它都不要**；而**写文件的 API 要显式选**，不要靠默认值 ——
+> 两边的默认值都是错的（PS 5.1 默认加 BOM，Python `open()` 默认不加）。
