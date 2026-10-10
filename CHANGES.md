@@ -958,6 +958,121 @@ CI 只装测试依赖，于是暴露。
    > 这是一类很典型的**文档腐化**：结论曾经成立，前提变了却没人回头改。
    > 记在这里提醒自己：**改动某个机制时，要回头搜一遍依赖该机制的表述**。
 
+### 9.16 CI 运行史确认 + 步进摘要 + 修掉 test_09 的「后端未启动却硬失败」缺陷（第 18 个提交）
+
+#### ① 状态：推送成功，CI 运行史已由独立证据确认
+
+```
+git push:  4d2fb1e..e069adb  main -> main            ✅  ahead/behind = 0 0
+run #6:    success（47 秒，sha=e069adb，event=push）  ← 这次推送触发的，pytest 真跑了 18s
+运行史:    #1~#4 failure（调试过程）→ #5 success → #6 success
+```
+
+> ★ 我把这条记下来的原因：**运行史是我拿不到的**（我看不到 Actions 页面，
+> 且运行日志下载需认证）。此前我只能说"按记录采信"，是仓库所有者用 API 独立查证的。
+> 「记录属实」这个结论不该由我自己下 —— 这一点值得在变更记录里写清楚。
+>
+> 另外，run #6 由 `push` 事件触发这件事，**反向验证了 `paths-ignore` 只忽略 `**.md`** 的判断：
+> 该次提交同时改了 `.yml` 与 `.md`，而 workflow 仍然触发 → `.yml` 不在忽略范围内。
+
+#### ② 采纳建议：用 `GITHUB_STEP_SUMMARY` 让绿色运行也能看到用例统计
+
+**动机**：原先「输出用例统计」只 `print`，而运行日志下载接口需认证（匿名 403）——
+失败那一半已有 annotation 兜底，**成功那一半什么都看不到**。
+`GITHUB_STEP_SUMMARY` 在 public 仓库上匿名可读且直接渲染在 run 页面，正好补上。
+
+**顺带一个附加价值**：它把「**跳过了多少**」变成公开事实。
+skipped 数量本身就是警示信号 —— 例如后门没开会让绝大多数用例 skip，
+那正是"假的绿色"的典型形态（见下面第 ④ 条）。
+
+**实现后我做了真实预演，而不是"看着对就提交"**：
+
+| 检查 | 结论 |
+|---|---|
+| YAML dedent 后 Python 缩进 | 打印实际执行的脚本文本逐行核对，无意外缩进 |
+| ★ **行尾风险** | 工作区是 CRLF，而 bash 的 heredoc 终止符 `PY\r` **匹配不上 `PY`** → heredoc 不会终止。<br>查 `git ls-files --eol` 得到 **`i/lf w/crlf`** → 索引存的是 LF，runner 拿到 LF，所以没问题。<br>（这也解释了之前的 heredoc 为什么在 CI 上能跑） |
+| ★ **真实执行** | 本机有 git 自带的 bash，于是把脚本按 LF 抽出来**真的跑了一遍**：<br>输出 `总计 201 条 / passed 197 / skipped 4 / pytest-html: 180261 bytes`，exit code 0 |
+| ★ **中文乱码** | 预演时 summary 里的中文**真的乱码了**（本机 bash 继承了 GBK 控制台）。<br>虽然 runner 上按 PEP 540 一般也是 UTF-8，但这条 summary 是要公开可读的，**不赌"理论上没问题"**：<br>已在 job 级加 `PYTHONIOENCODING: utf-8`，复跑后乱码消失（已验证） |
+
+#### ③ ★ 修掉 test_09 的「后端未启动却硬失败」缺陷（我自己引入的）
+
+**怎么发现的**：做上面第 ④ 条的守卫验证时，我以后门关闭的方式起 SUT 跑了一次全量，
+结果除了守卫该失败的那 1 条之外，**还有 8 条 test_09 硬失败**：
+
+```
+FAILED test_09_lunarlink_smoke.py::TestLoginAndToken::test_login_success
+FAILED test_09_lunarlink_smoke.py::TestLoginAndToken::test_login_wrong_password
+FAILED test_09_lunarlink_smoke.py::TestLoginAndToken::test_login_missing_password
+FAILED test_09_lunarlink_smoke.py::TestAuthContract::test_bearer_prefix_is_rejected
+FAILED test_09_lunarlink_smoke.py::TestAuthContract::test_missing_authorization
+FAILED test_09_lunarlink_smoke.py::TestAuthContract::test_garbage_token
+FAILED test_09_lunarlink_smoke.py::TestAuthContract::test_anonymous_cannot_write
+```
+
+**根因**：只有走 `platform_user` / `platform_admin` 的用例会在平台挂掉时 skip
+（`_platform_client` 捕获了 `RequestException`），而用**匿名 `platform` fixture**
+或直接 `requests` 的那 8 条会抛 `ConnectionError` 硬失败。
+
+**这意味着我此前在 README 与 CHANGES 里写的「平台没起来时整组 skip」对这 8 条是假的。**
+（典型的"文档描述了意图，但实现只覆盖了一部分"。）
+
+**修法**：新增 session 级 `platform_ready` 探测 fixture，并在 test_09 用
+`pytestmark = [pytest.mark.platform, pytest.mark.usefixtures("platform_ready")]` 挂成模块级闸门
+→ 模块内**每条**用例都先过这道闸。
+
+**踩到的小坑**：我第一版写成 `pytest.usefixtures(...)`，**pytest 9 里这个属性已不存在**
+（收集期 `AttributeError`）。必须用 `pytest.mark.usefixtures`。
+
+**修复后实测**（后端关闭时单跑 test_09）：
+
+```
+exit code = 0      allure: {'skipped': 26}  总计: 26
+```
+
+即 26 条**全部干净 skip**，与文档声称的行为一致。
+
+#### ④ 关于「后门守卫」：实测确认**它已经存在**，所以我没有再加一条重复的
+
+原计划是"新增一条无条件失败的守卫，把后门开着从依赖 env 变成机制保证"。
+我先做了负向验证（**以后门关闭的方式起 SUT**，`/health` 返回 `test_hooks:false`，跑全量）：
+
+```
+exit code = 1
+FAILED test_00_report_chain.py::TestReportChain::test_sut_test_hooks_enabled
+```
+
+**结论：这套机制已经生效** —— `test_00` 里的 `test_sut_test_hooks_enabled` 刻意**不依赖
+`sut_seeded`**（依赖了就一起 skip，守卫会失效），只依赖 `sut_ready`（它只探 `/health`，
+后门关着也返回 200，所以放得过来）。所以后门关闭时整轮**不会假绿**，是红的。
+
+**因此我只做了一件不重复的事**：把它的失败信息改成**可操作**的。
+原来只报 `assert 404 == 200`，看的人不知道该做什么；现在直接说明影响与修法：
+
+```
+SUT 未开启测试后门（GET /api/_test/ping -> HTTP 404）。
+  影响：sut_seeded 会跳过，绝大多数用例随之 skip —— 这轮回归的结果不可信。
+  修法：用启动器起服务（它会带上 SUT_ENABLE_TEST_HOOKS=1）：
+        cd D:\Projects ; .\svc.ps1 start sut
+  不要直接 `python sut/run.py` —— 后门默认是【关闭】的（安全默认）。
+```
+
+#### ⑤ 修掉 README 里一处数字腐化
+
+`（--unshallow 的代价很小：实测 21 → 112 提交…）` —— 实际已经是 **117** 个提交。
+已加「（当时）」并补一句：**这类计数会随开发增长，以 `git rev-list --count HEAD` 为准，
+别信任何文档里冻结的数字**。这是与 9.15④ 同一类腐化，只是这次是数字。
+
+#### ⑥ 数字更新
+
+| 项 | 值 |
+|---|---|
+| 用例总数 | 201（业务 175 + 平台冒烟 26） |
+| 全量（两个服务都在） | 197 passed + 4 skipped，33.51s |
+| test_09 单跑 / 平台未启动 | 26 skipped，exit 0 |
+| test_09 单跑 / 平台已启动 | 23 passed + 3 xfailed |
+| 全量 / 后门关闭 | exit 1，且**只有**守卫 1 条 FAILED |
+| 平台库存活项目 | 0（写用例自清理有效） |
+
 **两处对原设计的偏差（需知悉）**
 
 1. **新增了 `POST /api/orders/{order_no}/ship`（admin 发货）** —— 原设计 6 个订单接口里没有它，

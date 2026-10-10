@@ -31,7 +31,12 @@ import uuid
 import allure
 import pytest
 
-pytestmark = pytest.mark.platform
+# ★ platform_ready 是「平台不可达就整组 skip」的唯一闸门。
+#   不加它的话，用匿名 platform / 直接 requests 的那些用例会在平台挂掉时硬失败，
+#   而走 platform_user / platform_admin 的用例却会 skip —— 同一模块行为不一致（实测踩过）。
+#   注意：`pytest.usefixtures` 这个写法在 pytest 9 里已不存在（收集期 AttributeError），
+#   必须用 `pytest.mark.usefixtures`。
+pytestmark = [pytest.mark.platform, pytest.mark.usefixtures("platform_ready")]
 
 
 def _unique_name(prefix: str = "smoke") -> str:

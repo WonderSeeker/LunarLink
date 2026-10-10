@@ -58,6 +58,13 @@ jobs:
     name: 接口回归（SUT 175 条）
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # ★ 显式把 Python 的 I/O 编码钉成 UTF-8。
+      #   本仓库的输出里有中文（用例标题、失败摘要、step summary），
+      #   而 runner 的 locale 不保证是 UTF-8；一旦被按别的编码写出去，
+      #   annotation 与 summary 里的中文就会变成乱码。
+      #   （本机用 bash 预演这个 step 时确实出现过乱码，所以不赌"理论上没问题"。）
+      PYTHONIOENCODING: utf-8
 
     steps:
       - name: 检出代码
@@ -174,16 +181,44 @@ jobs:
       - name: 输出用例统计
         if: always()
         working-directory: lunarlink_tests
+        # ★ 不只 print，还要写进 GITHUB_STEP_SUMMARY：
+        #   运行日志的下载接口需要认证（匿名 403），而 step summary 在 public 仓库上
+        #   【匿名可读】并直接渲染在 run 页面。失败那一半已有 annotation 兜底，
+        #   这里补上【成功】那一半 —— 让每次运行红绿都能看到 通过/失败/跳过 各多少。
+        #   另一个作用：把「跳过了多少」变成公开事实。skipped 数量本身就是警示信号
+        #   （例如后门没开会让绝大多数用例 skip，那是「假的绿色」的典型形态）。
         run: |
-          echo "=== junit 汇总 ==="
-          python - <<'PY'
-          import glob, json, collections, os
-          c = collections.Counter()
-          for p in glob.glob("allure-results/*-result.json"):
-              with open(p, encoding="utf-8") as fp:
-                  c[json.load(fp).get("status")] += 1
-          print("allure 用例统计:", dict(c), "总计:", sum(c.values()))
+          STATS=$(python - <<'PY'
+          import collections
+          import glob
+          import json
+          import os
+
+          counter = collections.Counter()
+          for path in glob.glob("allure-results/*-result.json"):
+              with open(path, encoding="utf-8") as fp:
+                  counter[json.load(fp).get("status")] += 1
+
+          total = sum(counter.values())
+          print("总计 {} 条".format(total))
+          for key in ("passed", "failed", "broken", "skipped", "unknown"):
+              if counter.get(key):
+                  print("  {:<8} {}".format(key, counter[key]))
+
+          html = "report.html"
+          if os.path.exists(html):
+              print("pytest-html: {} bytes".format(os.path.getsize(html)))
           PY
+          )
+          echo "$STATS"
+          {
+            echo "### 用例统计"
+            echo '```'
+            echo "$STATS"
+            echo '```'
+            echo "> 本 job 只跑业务套件（\`-m \"not platform\"\`）。平台冒烟 26 条是【本地套件】，"
+            echo "> 原因见第 10 节 README / workflow 里 platform 那段说明。"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 上传报告
         if: always()

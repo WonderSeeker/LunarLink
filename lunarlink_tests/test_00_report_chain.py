@@ -59,12 +59,36 @@ class TestReportChain:
             assert body["status"] == "ok"
             assert body["db"] is True
 
-    @allure.title("SUT 测试后门已开启：GET /api/_test/ping 返回 200")
-    @allure.severity(allure.severity_level.NORMAL)
+    @allure.title("★ 守卫：SUT 必须开启测试后门（否则整个套件不可信）")
+    @allure.severity(allure.severity_level.BLOCKER)
     @pytest.mark.smoke
     def test_sut_test_hooks_enabled(self, sut_base_url, sut_ready):
+        """把「后门必须开着」做成【机制保证】，而不是靠你记得设环境变量。
+
+        ★ 这条用例是【逃逸检测】，不是功能验证：
+          后门关着的时候，sut_seeded 会 skip，于是绝大多数用例跟着 skip ——
+          如果唯一信号是「一堆 skip」，整轮回归就会以 exit code 0 收尾，
+          变成一种【假的绿色】。所以这里必须【无条件失败】。
+
+        ★ 因此它【刻意不依赖 sut_seeded】（依赖了就一起 skip，守卫失效），
+          只用 sut_ready（只探 /health，后门关着它也返回 200，所以这道闸放得过来）。
+
+        实测依据：以后门关闭的方式起 SUT（test_hooks=false）跑全量 →
+        exit code = 1，本用例以 404 失败，整轮不会假绿。
+        """
         resp = requests.get(sut_base_url + "/api/_test/ping", timeout=10)
-        assert resp.status_code == 200
+
+        if resp.status_code != 200:
+            pytest.fail(
+                "SUT 未开启测试后门（GET /api/_test/ping -> HTTP {}）。\n"
+                "  影响：sut_seeded 会跳过，绝大多数用例随之 skip —— 这轮回归的结果不可信。\n"
+                "  修法：用启动器起服务（它会带上 SUT_ENABLE_TEST_HOOKS=1）：\n"
+                "        cd D:\\Projects ; .\\svc.ps1 start sut\n"
+                "  不要直接 `python sut/run.py` —— 后门默认是【关闭】的（安全默认）。".format(
+                    resp.status_code
+                )
+            )
+
         assert resp.json()["ok"] is True
 
     @allure.title("跳过的用例能被正确呈现（故意 skip）")

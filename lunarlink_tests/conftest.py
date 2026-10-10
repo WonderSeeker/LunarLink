@@ -310,6 +310,34 @@ def platform(platform_base_url: str) -> ApiClient:
     )
 
 
+@pytest.fixture(scope="session")
+def platform_ready(platform_base_url: str) -> dict:
+    """平台可就绪性探测：不可达就 skip【整个】平台冒烟组。
+
+    ★ 为什么需要它（这是一个真实缺陷的修复）：
+      原先只有走 platform_user / platform_admin 的用例会在平台挂掉时 skip
+      （因为 _platform_client 捕获了 RequestException），
+      而用【匿名 platform】或直接 requests 的那些用例会硬失败（ConnectionError）。
+      结果是「26 条里 18 条 skip、8 条 fail」—— 与文档写的“整组 skip”不符，
+      还会让本不该阻断回归的辅助套件把套件跑成红的。
+      实测发现：在后端未启动时跑一次全量，看到 8 条 FAILED 才暴露。
+
+    用法：test_09 里用 pytestmark 挂上它，这样模块内每条用例都先过这道闸。
+    """
+    try:
+        # /login/ 只接受 POST，GET 会回 405 —— 只要不是连接错误就说明服务活着
+        resp = requests.get(platform_base_url + "/login/", timeout=10)
+    except requests.RequestException as exc:  # noqa: BLE001
+        pytest.skip(
+            "LunarLink 平台不可用（{}）：{}\n"
+            "平台冒烟是【辅助套件】，平台没起来时整组跳过而不是失败（不阻断业务套件回归）。\n"
+            "如需运行它，请先执行：cd D:\\Projects ; .\\svc.ps1 start lunar-be".format(
+                platform_base_url, exc
+            )
+        )
+    return {"status_code": resp.status_code}
+
+
 def _platform_client(
     base_url: str, username: str, password: str, name: str
 ) -> ApiClient:

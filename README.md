@@ -283,8 +283,9 @@ git fetch --unshallow upstream     # 走 ghproxy 即可，不需要 github.com �
 否则 push 会报 `remote: fatal: did not receive expected object <sha>`，而**那个 sha 本地不存在、
 `git fsck` 又报干净** —— 因为浅克隆里"缺失的历史"属于**预期缺失**，fsck 查不出来。
 这两个事实同时成立，就是定位它的唯一线索。
-（`--unshallow` 的代价很小：实测 21 → 112 提交，pack 只从 12.22 MiB 涨到 13.46 MiB，
-delta 压缩把历史版本吃掉了。）
+（`--unshallow` 的代价很小：实测 **21 → 112 提交（当时）**，pack 只从 12.22 MiB 涨到 13.46 MiB，
+delta 压缩把历史版本吃掉了。仓库现在已有 117 个提交 —— **这类数字会随开发增长，
+以 `git rev-list --count HEAD` 为准，别信任何文档里冻结的计数**。）
 
 ## 5. 用例清单（201 条 = 业务套件 175 + 平台冒烟 26）
 
@@ -403,9 +404,12 @@ push 到 main 时跑**（纯文档与 `screenshots/**` 改动不触发）。
   实测把两者装进同一环境后连 `sut/seed.py --reset` 都会失败（依赖集冲突）。
 - **生成 Allure HTML 后不加 `|| true`**：报告流水线坏掉本来就该是红的；
   加了会出现「测试全绿但报告悄悄没了」这种最坏情况。
-- **失败时把 pytest 尾部 40 行发成 GitHub annotation**：workflow 运行日志的下载接口需要认证
-  （匿名请求会被 403），而 annotation 在公开仓库上**可匿名读取** ——
-  这样没有仓库权限的排查者不登录也能看到失败摘要。
+- **失败时把 pytest 尾部 40 行发成 GitHub annotation；成功时把用例统计写进 `GITHUB_STEP_SUMMARY`**：
+  workflow 运行日志的下载接口需要认证（匿名请求会被 403），而 annotation 与 step summary
+  在公开仓库上**可匿名读取**（summary 还会直接渲染在 run 页面）——
+  这样没有仓库权限的排查者不登录也能看到失败摘要与用例统计。
+  另一半考虑是：**把「跳过了多少」变成公开事实**。skipped 数量本身就是警示信号 ——
+  后门没开会让绝大多数用例 skip，那正是"假的绿色"的典型形态。
 
 > ★ 已实测通过：**run #5 `conclusion=success`**（仓库：https://github.com/WonderSeeker/LunarLink）。
 > 该次运行由仓库所有者触发。
