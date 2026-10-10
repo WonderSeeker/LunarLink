@@ -66,7 +66,7 @@
 | 阶段 1 | 摸清骨架：读 Django app 结构与 httprunner 内核，跑通「新建项目 → 新建用例 → 执行 → 看报告」，记录性能基线 | ✅ 链路已摸清（报告产出与基线数字待补） |
 | 阶段 2 | 用例层重构为 pytest + Requests + Allure（`lunarlink_tests/`） | ✅ 工程与报告链路完成（工具链体检 8 条全绿） |
 | 阶段 3 | 业务测试套件（`sut/` mock 电商 + 100+ 用例，正常/异常/边界/并发/幂等/越权） | ✅ SUT 完整（26 路径 / 32 端点，含 4 个测试后门）+ **175 条用例全绿**（174 passed / 1 故意 skip） |
-| 阶段 4 | GitHub Actions 每日回归 + README（架构图 / 用例清单 / 耗时口径） | 🚧 workflow 与 README 已完成并本地逐条验证；**待你在 Actions 页面手动触发一次确认**；平台冒烟套件未做 |
+| 阶段 4 | GitHub Actions 每日回归 + README（架构图 / 用例清单 / 耗时口径） | 🚧 workflow（含 SUT + 平台两个服务）与 README 已完成并本地逐条验证；平台冒烟 26 条已完成；**⚠️ 推送被阻断（github.com:443 不可达）且 origin 指向上游仓库，Actions 尚未真实触发 —— 需你先解决远端** |
 
 ### 4.2 文件变更
 
@@ -92,7 +92,9 @@
 | `sut/routers/__init__.py` | 路由包 |
 | `sut/routers/system.py` | `/health` 健康检查（数据库不可用返回 503） |
 | `sut/routers/test_hooks.py` | 测试后门（仅 `SUT_ENABLE_TEST_HOOKS=1` 时挂载）：`/api/_test/ping`、`/api/_test/token`（签发任意 TTL，**等价认证绕过**）、`/api/_test/user/{username}/unlock`、`/api/_test/user/{username}/expire_lock`（只拨锁定时间、保留失败计数） |
-| `.github/workflows/daily-regression.yml` | 每日回归：定时 + 手动触发，起 SUT → pytest → Allure HTML → 上传 artifact |
+| `.github/workflows/daily-regression.yml` | 每日回归：定时 + 手动触发，起 SUT + 起平台 → pytest（201 条）→ Allure HTML → 上传 artifact |
+| `lunarlink_tests/test_09_lunarlink_smoke.py` | 平台冒烟 26 条（`platform` marker）；含认证头契约锁定、业务错误码、权限边界、轻量写闭环、3 条已知缺陷 xfail |
+| `backend/apps/lunaruser/management/commands/ensure_smoke_user.py` | 扩展为幂等创建两个账号：非管理员（主力）+ 管理员（admin-only 端点） |
 | `README.md` | 追加 12 节测试体系说明（架构图 / 用法 / 用例清单 / 分层耗时实测 / 设计简化说明） |
 | `sut/routers/auth.py` | 认证模块：注册 / 登录（连续失败 5 次锁定 423 + Retry-After）/ 登出（纯 no-op）/ profile / refresh（旧换新） |
 | `sut/routers/products.py` | 商品模块：分页列表（边界校验）/ 详情 / 创建·更新·下架（admin）/ 库存查询 |
@@ -680,6 +682,195 @@ README 里明确写了「**不用这个数字去和上游比快了多少倍**」
 > ⚠️ 诚实声明：workflow 的 YAML 语法、`seed.py --reset`、`run.py` 就绪探测、
 > `--junitxml` 与 pytest-html 同时使用，**都在本地逐条实跑验证过**；
 > 但**尚未在 GitHub Actions 上真实触发**。首次请手动 Run workflow 确认。
+
+### 9.13 平台冒烟套件（test_09，26 条）与平台侧实测发现（第 14 个提交）
+
+#### ① 先合并到 main（13 提交 + 1 合并提交 = 领先 origin/main 14 个）
+
+按你的提醒执行 —— 你指出的前提是对的，我核实并记录：
+
+- **远端默认分支确实是 `main`**（`git symbolic-ref refs/remotes/origin/HEAD` → `origin/main`），
+  所以合并到 main 才能让 `on: schedule` 与 Actions UI 的入口生效
+- `main` 与 `origin/main` 当时同为 `f4d99ab`，无分叉，不需要先 pull
+- 用 `git merge --no-ff` 保留分支结构，合并提交 `b37f279`
+
+#### ② ⚠️ 推送失败，且发现一个更根本的问题（需要你决定）
+
+```
+$ git push --dry-run origin main
+fatal: unable to access 'https://github.com/tahitimoon/LunarLink.git/':
+Failed to connect to github.com:443 after 21083 ms: Could not connect to server
+```
+
+网络探测：`github.com:443` 不可达，`ghproxy.net:443` 可达。**所以现在推不上去，
+Actions 也就无法触发。**
+
+更根本的问题：`remote.origin.url` 指向 **`tahitimoon/LunarLink`（上游原作者的仓库）**，
+而不是你自己的 fork。`git branch -a` 里也没有其它远端分支。这意味着即使网络恢复，
+推送是否成功取决于你对那个仓库有没有写权限 —— 这一点我无法替你确认。
+
+待你决定：把 origin 换成你的 fork，还是你确实对该仓库有写权限。
+
+#### ③ test_09 平台冒烟（26 条）完成
+
+| 组 | 条数 | 内容 |
+|---|---|---|
+| 登录与令牌 | 3 | 登录成功、密码错 400、缺 password 400 |
+| 认证头契约 | 4 | **★ 加 `Bearer ` 前缀反而 401**（锁定裸 token 契约）、无头 401、垃圾 token 401、匿名写 401 |
+| 只读端点 | 9 | 5 个列表端点的分页信封（含 cursor 分页**无 count** 的差异）、用户列表含冒烟账号且不泄露 password、3 个「不存在」的业务错误码 |
+| 参数校验 | 2 | `/api`、`/test` 缺 `project` → 400 |
+| 权限边界 | 2 | 非管理员删项目 403、非管理员访问 gitlab-ci 403 |
+| 轻量写闭环 | 3 | 创建→列表可见→删除→消失（自清理）、重名 0101、缺必填字段 9999 |
+| 已知缺陷 | 3 | `/dashboard`、`/visit`、`/reports` → `xfail(strict=True)` |
+
+**实测结果**：`23 passed, 3 xfailed in 1.25s`，且**单跑 test_09 不需要 SUT**
+（8021 未监听时照样跑完，与你的核实一致）。
+
+#### ④ ★ xfail 方向我写反了（实测才发现）
+
+第一版把断言写成「期望 500」，结果 `XPASS(strict)` 报失败。
+**原因是 `xfail` 的语义是「本用例预期会失败」，所以用例体必须断言【正确行为】。**
+写成断言 500 等于把「平台有缺陷」说成「平台应该 500」，语义是错的。
+改成断言 200 后：缺陷在 → 断言失败 → XFAIL（绿）；上游修好 → 断言通过 → XPASS(strict) 失败
+→ 提醒撤掉标记。
+
+#### ⑤ 平台侧实测发现 6 条（都已固定成断言或写入 README）
+
+| # | 发现 | 处理 |
+|---|---|---|
+| 1 | 认证头是**裸 token**，`Bearer ` 前缀 → 401 | 锁成断言（契约一变就报错） |
+| 2 | 业务错误用 **HTTP 200** + `{"code":"0102"}` 表达 | 双层断言，避免"只断状态码"的假通过 |
+| 3 | `POST /project` 的 `desc`/`responsible` 必填（模型 `null=False` 且无 default） | 按正确请求体写用例 |
+| 4 | 缺必填字段只回 `9999 System Error`，不说是哪个字段 | 断言写成"当前确实是 9999"，并注明这不是预期行为，上游改进后失败提醒 |
+| 5 | **可移植性缺陷**：`/dashboard`、`/visit` 在 SQLite 下 500（`prepare.py`/`VisitView` 用 `DATE_FORMAT`/`YEARWEEK`） | `xfail(strict=True)`，归因修正见 9.14 |
+| 6 | **`ENABLE_LOGIN_ANALYSIS_LOG` 是死配置** —— `conf/env.py` 硬编码 `True`，不读环境变量。它让 `/api/user/login` 每次登录都调外部 IP 归属地 API（timeout 5s） | 本套件统一走 `/login/`（DRF-JWT），不经过该调用；已记录 |
+
+#### ⑥ conftest 修掉一个 order-dependent 隐患 + 新增管理员账号
+
+- **隐患**：原 `platform_admin` 会改写 session 级 `platform` 的 token（`platform.token = ...`），
+  于是「platform 到底带不带 token」取决于 fixture 实例化顺序 →
+  「未登录访问受保护接口 → 401」这类用例会时对时错。现在 `platform` **永不持有 token**，
+  每个身份各自新建客户端。
+- **`ensure_smoke_user` 扩展为建两个账号**：非管理员（主力，原设计意图不变）+
+  **管理员**（`is_staff=True`，仅供 admin-only 端点）。有了它，写用例能自己清理现场，
+  而不是每次留一条脏数据。
+
+> 实测确认：套件跑完平台库 `project` 表**存活行数 = 0**（历史行都是 `is_deleted=1` 的软删行，
+> 那是平台的设计）。之前看到的"残留 9 条"是我**手工探针**留下的，已清理。
+
+#### ⑦ CI 增加平台侧：三个必设项（都是实测踩出来的）
+
+| 设置 | 为什么 |
+|---|---|
+| `cp .env.example .env` | `.env` 被 gitignore，CI 里不存在，而 `conf/env.py` 在 **import 期**执行 `PROXY_PORT = int(os.getenv("PROXY_PORT"))`（**无默认值**）→ 缺它 Django 直接崩 |
+| `DATABASE_ENGINE=sqlite` | `settings.py` 里默认是 `mysql` |
+| `REDIS_ON=False` / `PROXY_ON=False` | `.env.example` 里是 `True`（本地 `.env` 是 `False`），不覆盖就会去连不存在的 Redis/MQ |
+
+**`load_dotenv() 默认不覆盖已有环境变量`这一点我实测确认过**（不是照文档推断）：
+进程环境给 `DATABASE_PORT=9999`、`REDIS_ON=True`，`conf.env` 取到的就是环境变量的值。
+
+#### ⑧ 一个我自己的统计方法错误 + 一个待观察异常
+
+- **`allure-results/` 是累积写入的**。我一度用它数出「1076 条」，其实那是历史上所有运行的累加。
+  正确做法是先 `Remove-Item allure-results -Recurse -Force` 再数（已写进 README）。
+- **待观察**：有一次全量运行出现 **999.70s 与 1 条 broken**，之后连续复跑均正常
+  （最长单测 1.23s，全量 27~34s）。SUT 日志里没有 `database is locked`、
+  没有 Traceback、没有 5xx。**我无法解释那一次，不编原因**，作为待观察项留在这里；
+  CI 侧由 `timeout-minutes: 15` 兜底。
+
+#### ⑨ 数字更新
+
+| 项 | 值 |
+|---|---|
+| 用例总数 | **201**（业务套件 175 + 平台冒烟 26）= 197 passed + 1 故意 skip + 3 xfailed |
+| 平台冒烟耗时 | 1.25s（26 条） |
+| 全量耗时 | 中位 31.4s（27.38 / 31.42 / 34.23） |
+
+### 9.14 纠正一个归因错误 + 平台冒烟合入 main（第 15 个提交）
+
+#### ① ★ 我把「三个端点都 500」错误地归因为「同一个原因」
+
+你的口径提醒（"这是**可移植性缺陷**，不是平台有严重 bug"）让我去复核，
+结果发现我原先写进 README、CHANGES 和 `xfail(reason=...)` 的**根因是错的**。
+
+**我原来的说法**：这三个端点都 500，原因是上游 `prepare.py` / `VisitView` 用了
+`DATE_FORMAT`、`YEARWEEK` 等 MySQL 专有 SQL。
+
+**抓真实异常后的真相**（三个独立原因）：
+
+| 端点 | 真实异常 | 性质 |
+|---|---|---|
+| `/dashboard` | `django.db.utils.OperationalError: no such function: DATE_FORMAT`（`prepare.py:166`） | **可移植性缺陷** |
+| `/visit?project=1` | 同上（`views/project.py:338` VisitView） | **可移植性缺陷** |
+| `/reports` | `ValueError: Cannot use None as a query value`（`report.py:157`） | **独立的 None 处理 bug，与数据库无关** |
+
+你说的是「**2 处**接口使用 MySQL 专有 SQL」—— **你是对的**，
+只有 `/dashboard` 与 `/visit` 属于可移植性缺陷。
+
+`/reports` 的真实原因：`search = request.query_params.get("search")` 未传参时是 `None`，
+而守卫写的是 `if search != ""`（`None != ""` 为真）→ `filter(name__contains=None)` → ValueError。
+**这个缺陷在 MySQL 下同样会 500**，所以它不是可移植性问题。
+
+#### ② 顺带挖出第三个缺陷：**错误告警中间件把真实异常掩盖了**
+
+我一开始**被 500 页面误导**了：三个端点的页面显示的都是
+`MissingSchema: Invalid URL '': No scheme supplied.`，而不是上面两个真实异常。原因：
+
+```
+真实异常 → backend/utils/middleware.py:121  process_exception
+        → apps/lunarlink/utils/qy_message.py:67  send（企业微信告警）
+        → requests.post("")   ← QY_WEB_HOOK 是空字符串
+        → MissingSchema，把原始异常顶掉
+```
+
+**排障时这会把方向带偏**（我本人就是先看到 MissingSchema 才去看 traceback 链的）。
+
+> 教训（已写进 README 与用例注释）：**「多个端点都 500」不等于「同一个原因」**，
+> 尤其当错误处理路径本身有毛病时。必须逐个端点拿真实异常。
+
+#### ③ 用例按真实根因拆成两组
+
+原来是一个 `parametrize` 覆盖 3 个端点、共用一条 reason。现在拆成：
+
+- `TestKnownPlatformDefectsPortability`：`/dashboard`、`/visit`（2 条，reason 说明可移植性缺陷 + CI 用 SQLite 会持续暴露它）
+- `TestKnownPlatformDefectsNoneHandling`：`/reports`（1 条，reason 说明 None 处理缺陷，并明确指出**这与数据库无关**）
+
+实测：`23 passed, 3 xfailed in 1.37s`（总数不变）。
+
+#### ④ 采纳你的口径修正
+
+README 里改为「平台声明支持 SQLite（`DATABASE_ENGINE=sqlite`），但 2 处代码使用了
+MySQL 专有 SQL，导致 SQLite 模式下返回 500」，不再写成"平台有严重 bug"；
+并补上你指出的正面副作用：**CI 用 SQLite 跑，正好每天把这个可移植性缺陷暴露一次**
+（若 CI 用 MySQL 则会被完全掩盖）。
+
+#### ⑤ 推送问题（Q1）：你的判断我接受，这步留给你手动做
+
+你厘清了这是**两个独立问题**：问题 A（origin 指向上游作者仓库，归属/权限）+
+问题 B（github.com HTTPS 被 SNI 层拦截）→ 所以**换 remote 不解决网络问题**。
+你说的「换一次网络推上去，而且只需要推一次，之后 Actions 在云端跑」是投入产出比最高的解。
+
+**我没有擅自改 remote**（改了也没用，而且会破坏现在的 ghproxy 拉取配置）。
+等你切换网络后，按下面执行（这批动作要在**同一次换网络**里做完）：
+
+```powershell
+# 1) 在 github.com 上 fork（或新建）自己的仓库 —— 这一步也需要 github.com 可达
+# 2) 把 push 目标换成自己的仓库，保留 upstream 做归属
+cd D:\Projects\LunarLink
+git remote set-url origin https://github.com/<你的账号>/LunarLink.git
+git remote add upstream https://ghproxy.net/https://github.com/tahitimoon/LunarLink.git
+
+# 3) 推送（此时 main 已含全部 15 个提交）
+git push -u origin main
+git push origin feat/platform-smoke        # 可选：保留分支供 PR 叙事
+
+# 4) 推送后在 GitHub 的 Actions 页面手动触发一次 Run workflow 确认
+```
+
+#### ⑥ Q2：platform-smoke 合入 main
+
+按你的判断执行 —— 本地合并没有成本，而且 `main` 应该是**完整状态**；
+我原先"不想堆推不出去的提交"的顾虑只对**继续开发新功能**成立，这批本来就是同一批。
 
 **两处对原设计的偏差（需知悉）**
 

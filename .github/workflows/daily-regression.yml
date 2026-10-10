@@ -11,11 +11,22 @@
 #   2. regression-report-pytest/  —— pytest-html 自包含 HTML（本地也能看）
 #   3. logs/                      —— SUT 启动日志与 /health 快照（排障用）
 #
-# ★ 关于 SUT 的启动方式（重要）
-#   仓库里没有真实的电商系统，「被测系统」是我们自建的 FastAPI mock（sut/）。
-#   所以这个 workflow 必须【先起 SUT 再跑 pytest】，这是与「测一个外部服务」
-#   最大的不同。SUT 启动时必须带 SUT_ENABLE_TEST_HOOKS=1，否则依赖测试后门的
-#   用例（过期 token、锁定到期）会因为拿不到后门而 skip —— 那是一种「假的绿色」。
+# ★ 关于两个被测对象（重要）
+#   本仓库的套件同时测两个东西，所以 CI 要起【两个服务】：
+#
+#     1) sut/        FastAPI mock 电商  :8021   → test_00 ~ test_08（175 条，业务套件）
+#     2) backend/    LunarLink 平台本体 :8001   → test_09（26 条，平台冒烟，platform marker）
+#
+#   SUT 启动时必须带 SUT_ENABLE_TEST_HOOKS=1，否则依赖测试后门的用例
+#   （过期 token、锁定到期）会因为拿不到后门而 skip —— 那是一种「假的绿色」。
+#
+#   平台侧启动有两个坑，都是实测踩出来的（见下面各 step 的注释）：
+#     a) backend/.env 被 gitignore，CI 里不存在，而 conf/env.py 里有
+#        `PROXY_PORT = int(os.getenv("PROXY_PORT"))`（无默认值）→ 缺它直接 ImportError。
+#        所以要先 `cp .env.example .env`。
+#     b) 但 .env.example 的 REDIS_ON/PROXY_ON 是 True（本地 .env 是 False），
+#        直接用会去连本地没有的 Redis/MQ。所以这几个开关必须在 job env 里显式覆盖。
+#        （load_dotenv() 默认不覆盖已存在的环境变量，所以 job env 优先级更高。）
 # ============================================================================
 
 name: 每日回归
@@ -80,6 +91,46 @@ jobs:
           done
           echo "::error::SUT 在 30 秒内没有就绪"
           cat logs/sut.out
+          exit 1
+
+      - name: 准备平台数据库与冒烟账号
+        env:
+          # ★ settings.py 里 DATABASE_ENGINE 默认是 mysql；CI 没有 MySQL，必须显式给 sqlite
+          DATABASE_ENGINE: sqlite
+          # 与「已知可用的本地 .env」对齐，避免去连不存在的 Redis / 录制代理
+          REDIS_ON: "False"
+          PROXY_ON: "False"
+          PROXY_PORT: "7778"
+        working-directory: backend
+        run: |
+          # ★ 必须先有 .env：conf/env.py 在 import 期就会执行
+          #   `PROXY_PORT = int(os.getenv("PROXY_PORT"))`，缺它直接崩，Django 起不来。
+          cp .env.example .env
+          python manage.py migrate --noinput
+          # 幂等地准备两个冒烟账号：非管理员（主力）+ 管理员（admin-only 端点）
+          python manage.py ensure_smoke_user
+
+      - name: 启动平台并等待就绪
+        env:
+          DATABASE_ENGINE: sqlite
+          REDIS_ON: "False"
+          PROXY_ON: "False"
+          PROXY_PORT: "7778"
+        run: |
+          cd backend
+          nohup python manage.py runserver 127.0.0.1:8001 --noreload > ../logs/lunar-be.out 2>&1 &
+          echo "平台已在后台启动（pid=$!）"
+          for i in $(seq 1 40); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8001/login/ || true)
+            # /login/ 只接受 POST，GET 会回 405 —— 只要不是 000，就说明服务已起来
+            if [ "$code" != "000" ] && [ -n "$code" ]; then
+              echo "平台就绪（第 ${i} 次探测，HTTP $code）"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::LunarLink 平台在 40 秒内没有就绪"
+          cat ../logs/lunar-be.out
           exit 1
 
       - name: 执行 pytest
