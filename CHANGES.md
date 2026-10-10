@@ -1138,6 +1138,51 @@ forced to run on Node.js 24: actions/checkout@v4, actions/setup-python@v5, actio
 `@v5`/`@v6` 这些标签具体存在与否我没有核实，靠猜去改很可能直接把 CI 改红 ——
 那比留着一条 warning 更糟。要处理的话，正确顺序是**先查这些 action 的可用大版本，再改**。
 
+### 9.18 处理两条外部环境变更警告：钉住 runner + 升 action 版本（第 20 个提交）
+
+两条警告都是从 **annotation** 里读到的（它们是 warning/notice 级，页面上不显眼）——
+这也算第 9.17 条那个 notice 设计的额外收益。
+
+#### ① 时间敏感：`ubuntu-latest` 将在 2026-10-19 迁到 Ubuntu 26.04
+
+**处理**：`runs-on: ubuntu-latest` → **`ubuntu-24.04`**。
+
+**先核实再改**：用 contents API 取 `actions/runner-images` 的 README，
+确认 `ubuntu-24.04` 仍是有效 label（README 里明确列着
+`Ubuntu 24.04 | x64 | ubuntu-latest or ubuntu-24.04`），同时看到 `ubuntu-26.04` 已存在。
+
+**为什么必须钉**：runner 换镜像后系统依赖可能变化 —— 一个**跟代码无关的外部变更**
+就能让 CI 突然变红。钉住后，镜像升级由我们主动选时机。
+
+#### ② 长期：Node.js 20 弃用（checkout@v4 / setup-python@v5 / upload-artifact@v4 被强制跑在 Node 24）
+
+**先查真实可用大版本**（没有按"建议的版本号"直接写）：
+
+| action | 最新 release | 可用大版本 | 建议值 | **我采用** |
+|---|---|---|---|---|
+| `actions/checkout` | v7.0.1 | v1…v7 | v5 | **v6** |
+| `actions/setup-python` | v7.0.0 | v1…v7 | v6 | **v6** |
+| `actions/upload-artifact` | v7.0.2（3 天前） | v1…v7 | v5 | **v6** |
+
+**采用「够用的最小大版本」v6，而不是直接跳最新 v7，两个理由都是具体的**：
+
+1. **`checkout` 取 v6 而不是建议的 v5**：声明 Node 24 的是 **v6**（v6.0.0 release note
+   "Node.js 24 support details and requirements"）。**用 v5 很可能清不掉这条警告** ——
+   目标是"脱离 Node 20"，不是"数字变大"。
+2. **`setup-python` 特意停在 v6、不上 v7**：v6.0.0 的破坏性变更就是"升级到 node 24"（正好达成目标）；
+   而 **v7.0.0 的 release note 里有一条 `Remove EOL Python versions`**，
+   而 **Python 3.10 恰好在这个月（2026-10）EOL** → 上 v7 有让 `python-version: "3.10"`
+   直接装不上的风险，而后端 venv 就是 3.10.11，CI 要对齐它。
+   > 「升到最新」在这里**不是**更优解。若将来要上 v7，应先确认 3.10 仍在
+   > `actions/python-versions` 的 manifest 里。
+3. `upload-artifact` 取 v6 而不是 v7.0.2（发布仅 3 天）：v6.0.0 已明确声明
+   `runs.using: node24` 且要求 runner ≥ 2.327.1（托管 runner 远高于此）。
+   跳最新**无收益、多一份新版本风险**。
+
+**顺带记一个失败的尝试**：我曾想把 `actions/python-versions` 的 manifest 拉下来直接确认 3.10 是否还在，
+但那个文件太大（60 秒超时）。所以这一条我**没有**拿到直接证据，是靠 release note 推断的 ——
+如实标注，不把它说成"已验证"。
+
 **两处对原设计的偏差（需知悉）**
 
 1. **新增了 `POST /api/orders/{order_no}/ship`（admin 发货）** —— 原设计 6 个订单接口里没有它，

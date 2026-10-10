@@ -56,7 +56,12 @@ permissions:
 jobs:
   regression:
     name: 接口回归（SUT 175 条）
-    runs-on: ubuntu-latest
+    # ★ 钉住具体版本而不是 ubuntu-latest。
+    #   原因：GitHub 会改 ubuntu-latest 指向的镜像（当前 = 24.04，公告 2026-10-19 起迁到 26.04）。
+    #   而 runner 换了之后系统依赖可能变化 → 一个跟代码无关的外部变更就能让 CI 突然变红。
+    #   钉住后，镜像升级由我们主动选时机，而不是被动挨一下。
+    #   （已核实 ubuntu-24.04 是有效 label：runner-images README 里明确列着它。）
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       # ★ 显式把 Python 的 I/O 编码钉成 UTF-8。
@@ -68,10 +73,21 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        # ★ 统一升到【第一个声明 Node 24 的大版本】v6，而不是直接跳最新。
+        #   起因：GitHub 报 "Node.js 20 is deprecated ... forced to run on Node.js 24"。
+        #   已核算过可用大版本：checkout 有 v1..v7（最新 v7.0.1），
+        #   但 v6 就已经是 Node 24（v6.0.0 release note: "Node.js 24 support"），
+        #   本流程没用它任何输入，所以取"够用的最小大版本"即可。
+        uses: actions/checkout@v6
 
       - name: 安装 Python 3.10
-        uses: actions/setup-python@v5
+        # ★ setup-python 特意【停在 v6，不上 v7】—— 这是一个有依据的决定：
+        #   v6.0.0 的破坏性变更就是"升级到 node 24"，正好解决警告；
+        #   而 v7.0.0 的 release note 里有一条 "Remove EOL Python versions"，
+        #   而 Python 3.10 恰好在 2026-10 EOL → 上 v7 有让 python-version: 3.10
+        #   直接装不上的风险。本项目后端 venv 是 3.10.11，CI 要对齐它。
+        #   （若要上 v7，应先确认 3.10 仍在 python-versions 的 manifest 里。）
+        uses: actions/setup-python@v6
         with:
           python-version: "3.10"
           cache: pip
@@ -233,16 +249,19 @@ jobs:
 
       - name: 上传报告
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: regression-report-allure
           path: allure-report
+          # 版本选择依据：upload-artifact v6.0.0 明确声明 runs.using: node24，
+          # 且要求 runner >= 2.327.1（GitHub 托管 runner 远高于此）。
+          # 未跳最新 v7（发布于 2026-10-07，仅 3 天）—— 无收益、多一份新版本风险。
           if-no-files-found: warn
           retention-days: 30
 
       - name: 上传 pytest-html 与日志
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: regression-report-pytest
           path: |

@@ -415,6 +415,15 @@ push 到 main 时跑**（纯文档与 `screenshots/**` 改动不触发）。
     `check-runs.output.summary` 是空的。）
   - 另一半考虑：**把「跳过了多少」变成公开事实**。skipped 数量本身就是警示信号 ——
     后门没开会让绝大多数用例 skip，那正是"假的绿色"的典型形态。
+- **钉住 runner 与 action 版本，不跟 `-latest`**：
+  `runs-on: ubuntu-24.04`（而不是 `ubuntu-latest`）、action 一律用**够用的最小大版本** v6。
+  原因：`ubuntu-latest` 指向的镜像会被 GitHub 改掉（公告 2026-10-19 起从 24.04 迁到 26.04），
+  而 runner 换镜像后系统依赖可能变化 —— **一个跟代码无关的外部变更就能让 CI 突然变红**。
+  钉住之后，镜像升级由我们主动选时机，而不是被动挨一下。
+  > ★ 一个具体取舍：`setup-python` **特意停在 v6 不上 v7**。v7 的 release note 里有
+  > "Remove EOL Python versions"，而 Python 3.10 恰好在 2026-10 EOL ——
+  > 上 v7 有让 `python-version: "3.10"` 直接装不上的风险，而后端 venv 就是 3.10.11。
+  > 「升到最新」在这里不是更优解。
 
 > ★ 已实测通过：**run #5 `conclusion=success`**（仓库：https://github.com/WonderSeeker/LunarLink）。
 > 该次运行由仓库所有者触发。
