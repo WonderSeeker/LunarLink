@@ -9,9 +9,6 @@
 > **上游与授权**：本项目 fork 自 [tahitimoon/LunarLink](https://github.com/tahitimoon/LunarLink)，
 > 遵循 MIT License（`Copyright (c) 2023 geekbing`）。上游的平台主体**未做改动**；
 > 本次改造的产出集中在**测试工程部分** —— 见下方「接口自动化测试体系」一节与 [CHANGES.md](./CHANGES.md)。
->
-> 说明：原先顶部的 stars / forks / release 徽章已移除 —— 它们指向上游仓库，
-> 显示的是上游的数据，放在本仓库容易造成误读。
 
 ## 平台简介
 
