@@ -340,20 +340,48 @@ class TestProjectWriteCycle:
 
 
 # ============================================================================
-# 七、已知缺陷：SQLite 下必定 500（上游用了 MySQL 专有 SQL）
+# 七、已知缺陷：SQLite 模式下必定 500
+#
+# ★★ 这一组的原因我一开始判错了，这里记下纠正过程（避免后人再踩）★★
+#
+#   初判：这三个端点都 500，我在日志里看到 prepare.py / VisitView 里有
+#         DATE_FORMAT、YEARWEEK 这类 MySQL 专有 SQL，就归因为「同一个可移植性缺陷」。
+#
+#   实测纠正（抓真实异常 + traceback 后）：
+#     1. /dashboard、/visit  → django.db.utils.OperationalError: no such function: DATE_FORMAT
+#                              ← 确实【是】可移植性缺陷，命中 2 处代码
+#                              （prepare.py 的 aggregate_reports_or_case_bydate、VisitView.list）
+#     2. /reports            → ValueError: Cannot use None as a query value
+#                              ← 【不是】SQL 问题：report.py:157 的
+#                                `search = request.query_params.get("search")` 拿到 None，
+#                                而守卫写的是 `if search != ""`（None != "" 为真）→
+#                                `filter(name__contains=None)` 直接报错。
+#                                这个缺陷在 MySQL 下同样会 500，与数据库无关。
+#     3. 三个端点的 500 页面显示的都是 MissingSchema（不是上面两个真实异常）——
+#        因为 backend/utils/middleware.py 的 process_exception 会去调
+#        企业微信告警 qy_message.send()，而 QY_WEB_HOOK 是空串
+#        → requests.post("") → MissingSchema。
+#        ★ 于是【错误告警把真实异常掩盖了】，排障时会被引到完全错误的方向。
+#        我本人就是先被它误导，看到 MissingSchema 才发现要看 traceback 链。
+#
+#   教训：把「多个端点都 500」直接归因为「同一个原因」是危险的捷径。
+#        必须逐个端点拿到真实异常，尤其是当错误处理路径本身有问题时。
 # ============================================================================
 
 
 @allure.feature("已知平台缺陷")
-class TestKnownPlatformDefects:
-    @allure.title("已知缺陷：{path} 在 SQLite 下 500（上游使用 MySQL 专有 SQL）")
+class TestKnownPlatformDefectsPortability:
+    @allure.title("可移植性缺陷：{path} 在 SQLite 下 500（上游使用 MySQL 专有 SQL）")
     @pytest.mark.xfail(
         strict=True,
         reason=(
-            "上游 apps/lunarlink/utils/prepare.py 与 views/project.py 的 VisitView 使用了 "
-            "DATE_FORMAT / YEARWEEK 等 MySQL 专有 SQL，SQLite 无对应函数 -> OperationalError -> 500。"
-            "本仓库按 DATABASE_ENGINE=sqlite 运行，故这些端点不可用。"
-            "★ 用 strict=True：上游一旦修好，这条会变成 XPASS 失败，提醒我们删掉它。"
+            "【可移植性缺陷】平台声明支持 SQLite（settings.py 的 DATABASE_ENGINE=sqlite 开关），"
+            "但以下 2 处代码使用了 MySQL 专有 SQL：\n"
+            "  * apps/lunarlink/utils/prepare.py 的 aggregate_reports_or_case_bydate → DATE_FORMAT/YEARWEEK\n"
+            "  * apps/lunarlink/views/project.py 的 VisitView.list → DATE_FORMAT\n"
+            "SQLite 无对应函数 → django.db.utils.OperationalError: no such function: DATE_FORMAT。\n"
+            "即：这是 SQLite 模式下的可移植性缺陷，不是「平台功能全坏」。\n"
+            "★ 用 strict=True：上游一旦补齐 SQLite 兼容，这条会 XPASS 失败，提醒我们撤掉标记。"
         ),
     )
     @pytest.mark.parametrize(
@@ -361,10 +389,9 @@ class TestKnownPlatformDefects:
         [
             "/api/lunarlink/dashboard",
             "/api/lunarlink/visit?project=1",
-            "/api/lunarlink/reports",
         ],
     )
-    def test_mysql_only_endpoints(self, platform_user, path):
+    def test_mysql_only_sql_on_sqlite(self, platform_user, path):
         """按【正确行为】断言：这些只读端点应当返回 200。
 
         ★ 断言必须写成「期望 200」，不能写成「期望 500」。
@@ -376,7 +403,30 @@ class TestKnownPlatformDefects:
         """
         resp = platform_user.get(path)
         assert resp.status_code == 200, (
-            "{} 实际 HTTP {}（这是已知缺陷：上游 MySQL 专有 SQL 在 SQLite 下不可用）".format(
+            "{} 实际 HTTP {}（可移植性缺陷：上游 MySQL 专有 SQL 在 SQLite 下不可用）".format(
                 path, resp.status_code
             )
+        )
+
+
+@allure.feature("已知平台缺陷")
+class TestKnownPlatformDefectsNoneHandling:
+    @allure.title("缺陷：/reports 未传 search 时 500（None 被 `!= \"\"` 放行）")
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "apps/lunarlink/views/report.py:157 —— `search = request.query_params.get(\"search\")` "
+            "在未传参时得到 None，而守卫写的是 `if search != \"\"`（None != \"\" 成立），"
+            "于是执行 `filter(name__contains=None)` → ValueError: Cannot use None as a query value。\n"
+            "★ 这与数据库无关（MySQL 下同样会 500），是独立的 None 处理缺陷，"
+            "不应与上面的「可移植性缺陷」混为一谈。\n"
+            "正确写法类似 `if search:` 或 `if search not in (None, \"\")`。\n"
+            "★ strict=True：上游修好后会 XPASS 失败，提醒撤标记。"
+        ),
+    )
+    def test_reports_list_without_search(self, platform_user):
+        """按【正确行为】断言：不传 search 也应该正常返回 200。"""
+        resp = platform_user.get("/api/lunarlink/reports")
+        assert resp.status_code == 200, (
+            "/api/lunarlink/reports 实际 HTTP {}（None 处理缺陷）".format(resp.status_code)
         )

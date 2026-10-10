@@ -425,11 +425,22 @@ python manage.py ensure_smoke_user      # 幂等：建非管理员账号 + 管�
 | **业务错误用 HTTP 200 表达** | `GET /project/999999` → **200** + `{"code":"0102","success":false}`。所以只断状态码的用例在这里会"假通过"，必须双层断言 |
 | **`POST /project` 要求 `desc` 与 `responsible`** | 二者是 `CharField(null=False)` 且无 `default`/`blank` → ModelSerializer 里成为必填。只传 `name` 会得到 `{"code":"9999","msg":"System Error"}` |
 | ★ **缺字段时报 `9999 System Error`** | 不说是哪个字段、也不回 400，调用方只能翻源码。已写成断言并注明"这不是预期行为"，上游改进后会失败提醒 |
-| ★ **3 个端点在 SQLite 下必定 500** | `/dashboard`、`/visit`、`/reports` —— 上游 `utils/prepare.py` 与 `VisitView` 用了 `DATE_FORMAT` / `YEARWEEK` 等 **MySQL 专有 SQL**。用 `xfail(strict=True)` 显式记录 |
+| ★ **可移植性缺陷**：`/dashboard`、`/visit` 在 SQLite 下 500 | 平台声明支持 SQLite（`settings.py` 有 `DATABASE_ENGINE=sqlite` 开关），但 **2 处代码**使用了 MySQL 专有 SQL，导致 SQLite 模式下返回 500：`utils/prepare.py` 的 `aggregate_reports_or_case_bydate`（`DATE_FORMAT`/`YEARWEEK`）与 `views/project.py` 的 `VisitView.list`（`DATE_FORMAT`）→ `OperationalError: no such function: DATE_FORMAT`。用 `xfail(strict=True)` 显式记录 |
+| ★ **独立的 None 处理缺陷**：`/reports` 不传 `search` 就 500 | **与数据库无关**（MySQL 下同样会坏）：`report.py` 的 `search = request.query_params.get("search")` 未传参时是 `None`，而守卫写的是 `if search != ""`（`None != ""` 成立）→ `filter(name__contains=None)` → `ValueError: Cannot use None as a query value` |
+| ★ **错误告警中间件掩盖真实异常** | 上面三个端点的 500 页面显示的**都不是**真实异常，而是 `MissingSchema: Invalid URL ''` —— 因为 `backend/utils/middleware.py` 的 `process_exception` 会去发企业微信告警（`qy_message.send`），而 `QY_WEB_HOOK` 是空串 → `requests.post("")` 直接抛错，把原始异常顶掉。排障时会被引向完全错误的方向 |
 | **`ENABLE_LOGIN_ANALYSIS_LOG` 是死配置** | `conf/env.py` 把它**硬编码为 `True`**，不读环境变量，`.env` 里写 `False` 无效。它会让 `/api/user/login` 每次登录都去调外部 IP 归属地 API（timeout 5s）。本套件统一走 `/login/`（DRF-JWT），**不经过那段调用**，所以不受影响 |
 
 > 关于 `xfail(strict=True)` 的写法：用例体断言的是**正确行为（200）**，不是"应该 500"。
 > 方向写反会变成 `XPASS(strict)` 报错 —— 我第一版就写反了，实测才发现。
+
+> ★ **一个正面副作用**：CI 默认用 SQLite 跑（因为 CI 上没有 MySQL），于是**这个可移植性缺陷
+> 每天都会被自动暴露一次**。如果 CI 用 MySQL，它会被完全掩盖 —— 这正是"在 CI 里保持与
+> 本地一致的、更弱的依赖环境"的价值。
+
+> ★ **一次我自己犯的归因错误**：初判时我看到这三个端点都 500，又在 `prepare.py`/`VisitView`
+> 里看到 MySQL 专有 SQL，就把它们归为**同一个原因**。抓真实 traceback 后才发现是
+> **两个不同缺陷 + 一个掩盖问题**（`/reports` 与 SQL 毫无关系）。教训：
+> **"多个端点都 500" ≠ "同一个原因"**，尤其是当错误处理路径本身有毛病时。
 
 ## 12. 本地环境与编码约定
 

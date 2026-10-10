@@ -742,7 +742,7 @@ Actions 也就无法触发。**
 | 2 | 业务错误用 **HTTP 200** + `{"code":"0102"}` 表达 | 双层断言，避免"只断状态码"的假通过 |
 | 3 | `POST /project` 的 `desc`/`responsible` 必填（模型 `null=False` 且无 default） | 按正确请求体写用例 |
 | 4 | 缺必填字段只回 `9999 System Error`，不说是哪个字段 | 断言写成"当前确实是 9999"，并注明这不是预期行为，上游改进后失败提醒 |
-| 5 | **3 个端点在 SQLite 下必定 500**（`prepare.py`/`VisitView` 用 `DATE_FORMAT`/`YEARWEEK`） | `xfail(strict=True)` |
+| 5 | **可移植性缺陷**：`/dashboard`、`/visit` 在 SQLite 下 500（`prepare.py`/`VisitView` 用 `DATE_FORMAT`/`YEARWEEK`） | `xfail(strict=True)`，归因修正见 9.14 |
 | 6 | **`ENABLE_LOGIN_ANALYSIS_LOG` 是死配置** —— `conf/env.py` 硬编码 `True`，不读环境变量。它让 `/api/user/login` 每次登录都调外部 IP 归属地 API（timeout 5s） | 本套件统一走 `/login/`（DRF-JWT），不经过该调用；已记录 |
 
 #### ⑥ conftest 修掉一个 order-dependent 隐患 + 新增管理员账号
@@ -785,6 +785,92 @@ Actions 也就无法触发。**
 | 用例总数 | **201**（业务套件 175 + 平台冒烟 26）= 197 passed + 1 故意 skip + 3 xfailed |
 | 平台冒烟耗时 | 1.25s（26 条） |
 | 全量耗时 | 中位 31.4s（27.38 / 31.42 / 34.23） |
+
+### 9.14 纠正一个归因错误 + 平台冒烟合入 main（第 15 个提交）
+
+#### ① ★ 我把「三个端点都 500」错误地归因为「同一个原因」
+
+你的口径提醒（"这是**可移植性缺陷**，不是平台有严重 bug"）让我去复核，
+结果发现我原先写进 README、CHANGES 和 `xfail(reason=...)` 的**根因是错的**。
+
+**我原来的说法**：这三个端点都 500，原因是上游 `prepare.py` / `VisitView` 用了
+`DATE_FORMAT`、`YEARWEEK` 等 MySQL 专有 SQL。
+
+**抓真实异常后的真相**（三个独立原因）：
+
+| 端点 | 真实异常 | 性质 |
+|---|---|---|
+| `/dashboard` | `django.db.utils.OperationalError: no such function: DATE_FORMAT`（`prepare.py:166`） | **可移植性缺陷** |
+| `/visit?project=1` | 同上（`views/project.py:338` VisitView） | **可移植性缺陷** |
+| `/reports` | `ValueError: Cannot use None as a query value`（`report.py:157`） | **独立的 None 处理 bug，与数据库无关** |
+
+你说的是「**2 处**接口使用 MySQL 专有 SQL」—— **你是对的**，
+只有 `/dashboard` 与 `/visit` 属于可移植性缺陷。
+
+`/reports` 的真实原因：`search = request.query_params.get("search")` 未传参时是 `None`，
+而守卫写的是 `if search != ""`（`None != ""` 为真）→ `filter(name__contains=None)` → ValueError。
+**这个缺陷在 MySQL 下同样会 500**，所以它不是可移植性问题。
+
+#### ② 顺带挖出第三个缺陷：**错误告警中间件把真实异常掩盖了**
+
+我一开始**被 500 页面误导**了：三个端点的页面显示的都是
+`MissingSchema: Invalid URL '': No scheme supplied.`，而不是上面两个真实异常。原因：
+
+```
+真实异常 → backend/utils/middleware.py:121  process_exception
+        → apps/lunarlink/utils/qy_message.py:67  send（企业微信告警）
+        → requests.post("")   ← QY_WEB_HOOK 是空字符串
+        → MissingSchema，把原始异常顶掉
+```
+
+**排障时这会把方向带偏**（我本人就是先看到 MissingSchema 才去看 traceback 链的）。
+
+> 教训（已写进 README 与用例注释）：**「多个端点都 500」不等于「同一个原因」**，
+> 尤其当错误处理路径本身有毛病时。必须逐个端点拿真实异常。
+
+#### ③ 用例按真实根因拆成两组
+
+原来是一个 `parametrize` 覆盖 3 个端点、共用一条 reason。现在拆成：
+
+- `TestKnownPlatformDefectsPortability`：`/dashboard`、`/visit`（2 条，reason 说明可移植性缺陷 + CI 用 SQLite 会持续暴露它）
+- `TestKnownPlatformDefectsNoneHandling`：`/reports`（1 条，reason 说明 None 处理缺陷，并明确指出**这与数据库无关**）
+
+实测：`23 passed, 3 xfailed in 1.37s`（总数不变）。
+
+#### ④ 采纳你的口径修正
+
+README 里改为「平台声明支持 SQLite（`DATABASE_ENGINE=sqlite`），但 2 处代码使用了
+MySQL 专有 SQL，导致 SQLite 模式下返回 500」，不再写成"平台有严重 bug"；
+并补上你指出的正面副作用：**CI 用 SQLite 跑，正好每天把这个可移植性缺陷暴露一次**
+（若 CI 用 MySQL 则会被完全掩盖）。
+
+#### ⑤ 推送问题（Q1）：你的判断我接受，这步留给你手动做
+
+你厘清了这是**两个独立问题**：问题 A（origin 指向上游作者仓库，归属/权限）+
+问题 B（github.com HTTPS 被 SNI 层拦截）→ 所以**换 remote 不解决网络问题**。
+你说的「换一次网络推上去，而且只需要推一次，之后 Actions 在云端跑」是投入产出比最高的解。
+
+**我没有擅自改 remote**（改了也没用，而且会破坏现在的 ghproxy 拉取配置）。
+等你切换网络后，按下面执行（这批动作要在**同一次换网络**里做完）：
+
+```powershell
+# 1) 在 github.com 上 fork（或新建）自己的仓库 —— 这一步也需要 github.com 可达
+# 2) 把 push 目标换成自己的仓库，保留 upstream 做归属
+cd D:\Projects\LunarLink
+git remote set-url origin https://github.com/<你的账号>/LunarLink.git
+git remote add upstream https://ghproxy.net/https://github.com/tahitimoon/LunarLink.git
+
+# 3) 推送（此时 main 已含全部 15 个提交）
+git push -u origin main
+git push origin feat/platform-smoke        # 可选：保留分支供 PR 叙事
+
+# 4) 推送后在 GitHub 的 Actions 页面手动触发一次 Run workflow 确认
+```
+
+#### ⑥ Q2：platform-smoke 合入 main
+
+按你的判断执行 —— 本地合并没有成本，而且 `main` 应该是**完整状态**；
+我原先"不想堆推不出去的提交"的顾虑只对**继续开发新功能**成立，这批本来就是同一批。
 
 **两处对原设计的偏差（需知悉）**
 
