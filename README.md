@@ -1,12 +1,17 @@
 # LunarLink
 
-[![GitHub License](https://img.shields.io/github/license/tahitimoon/LunarLink?color=yellow)](https://github.com/tahitimoon/LunarLink/blob/main/LICENSE)
-[![GitHub Release](https://img.shields.io/github/v/release/tahitimoon/LunarLink)](https://github.com/tahitimoon/LunarLink/releases)
-[![GitHub Repo stars](https://img.shields.io/github/stars/tahitimoon/LunarLink)](https://github.com/tahitimoon/LunarLink/stargazers)
-[![GitHub forks](https://img.shields.io/github/forks/tahitimoon/LunarLink)](https://github.com/tahitimoon/LunarLink/fork)
+[![每日回归（CI）](https://github.com/WonderSeeker/LunarLink/actions/workflows/daily-regression.yml/badge.svg)](https://github.com/WonderSeeker/LunarLink/actions/workflows/daily-regression.yml)
+[![MIT License](./LICENSE)](./LICENSE)
 [![Python Version](https://img.shields.io/badge/Python-%3E%3D3.9.5-green)](https://python.org/)
 [![Django Version](https://img.shields.io/badge/Django-3.2-blue)](https://docs.djangoproject.com/zh-hans/3.2/)
 [![Static Badge](https://img.shields.io/badge/Node-%3E%3D16.0.0-brightgreen)](https://nodejs.org/en)
+
+> **上游与授权**：本项目 fork 自 [tahitimoon/LunarLink](https://github.com/tahitimoon/LunarLink)，
+> 遵循 MIT License（`Copyright (c) 2023 geekbing`）。上游的平台主体**未做改动**；
+> 本次改造的产出集中在**测试工程部分** —— 见下方「接口自动化测试体系」一节与 [CHANGES.md](./CHANGES.md)。
+>
+> 说明：原先顶部的 stars / forks / release 徽章已移除 —— 它们指向上游仓库，
+> 显示的是上游的数据，放在本仓库容易造成误读。
 
 ## 平台简介
 
@@ -71,7 +76,7 @@ Redis >= 6.2.6
 
 ```bash
 # 克隆项目
-git clone https://github.com/tahitimoon/LunarLink.git
+git clone https://github.com/WonderSeeker/LunarLink.git
 
 # 进入项目目录
 cd LunarLink/frontend
@@ -93,7 +98,7 @@ yarn start
 
 ```bash
 # 克隆项目
-git https://github.com/tahitimoon/LunarLink.git
+git clone https://github.com/WonderSeeker/LunarLink.git
 
 # 进入项目目录
 cd LunarLink/backend
