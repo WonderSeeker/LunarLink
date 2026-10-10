@@ -33,6 +33,14 @@ pytest
 pytest-xdist
 pytest-html
 
+# ---------------------------- HTTP 客户端 ------------------------------------
+# ★ 必须显式声明：conftest.py 与 utils/client.py 直接 import requests。
+#   之前漏了它 —— 本地不报错是因为 backend/.venv 里由 backend/requirements.txt
+#   装了 requests==2.28.2，把这个缺口掩盖了；而 CI 只装本文件，于是 conftest
+#   在导入期就 ModuleNotFoundError: No module named 'requests'，整个套件跑不起来。
+#   教训：测试代码直接 import 的包，必须在测试依赖里显式声明，不能指望传递依赖。
+requests
+
 # ---------------------------- 报告 -----------------------------------------
 allure-pytest
 
