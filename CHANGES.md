@@ -1179,9 +1179,28 @@ forced to run on Node.js 24: actions/checkout@v4, actions/setup-python@v5, actio
    `runs.using: node24` 且要求 runner ≥ 2.327.1（托管 runner 远高于此）。
    跳最新**无收益、多一份新版本风险**。
 
-**顺带记一个失败的尝试**：我曾想把 `actions/python-versions` 的 manifest 拉下来直接确认 3.10 是否还在，
-但那个文件太大（60 秒超时）。所以这一条我**没有**拿到直接证据，是靠 release note 推断的 ——
-如实标注，不把它说成"已验证"。
+**证据缺口：已缩小，但未完全关闭**（如实记录，供将来升 v7 时决策）
+
+想直接确认 3.10 是否还在 `actions/python-versions` 的 **manifest** 里（setup-python 的版本来源），
+四条路径都试过：
+
+| 尝试 | 结果 |
+|---|---|
+| `Invoke-WebRequest` 取 manifest | 操作超时（60s） |
+| `web_fetch` 取 manifest | `Request timed out after 10000ms` |
+| 本机 `curl` | exit 35（SSL 证书链问题）—— 仓库所有者尝试 |
+| ★ **releases API**（比 manifest 小得多） | **成功**：最近 100 个 release 里有 **9 个 3.10.x**，<br>最新 **3.10.22 发布于 2026-10-01**（约 9 天前） |
+
+**由此可得的结论 —— 分两层，不混说**：
+
+- ✅ **已证实**：`actions/python-versions` **仍在为 3.10 构建并发布**（含本月一次）。
+  这大幅削弱了"3.10 已被移除"的担心。
+- ❌ **仍未证实**：setup-python **v7** 是否仍能安装 3.10。
+  v7 那条 "Remove EOL Python versions" 改的究竟是 manifest 还是仓库内部的测试夹具，
+  我没有读到对应 PR；而 manifest 本体用上述四条路径都拿不到。
+- 所以缺口从**「未知」缩小到「很可能没问题，但没验」**。
+  **结论不变**（当前停在 v6，不影响任何事）。将来真要升 v7 时，
+  先按上表第 4 条路径确认 3.10 仍在构建，再决定是升 v7 还是把 CI 与 venv 一起迁到 3.11/3.12。
 
 **两处对原设计的偏差（需知悉）**
 
