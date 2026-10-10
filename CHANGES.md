@@ -66,7 +66,7 @@
 | 阶段 1 | 摸清骨架：读 Django app 结构与 httprunner 内核，跑通「新建项目 → 新建用例 → 执行 → 看报告」，记录性能基线 | ✅ 链路已摸清（报告产出与基线数字待补） |
 | 阶段 2 | 用例层重构为 pytest + Requests + Allure（`lunarlink_tests/`） | ✅ 工程与报告链路完成（工具链体检 8 条全绿） |
 | 阶段 3 | 业务测试套件（`sut/` mock 电商 + 100+ 用例，正常/异常/边界/并发/幂等/越权） | ✅ SUT 完整（26 路径 / 32 端点，含 4 个测试后门）+ **175 条用例全绿**（174 passed / 1 故意 skip） |
-| 阶段 4 | GitHub Actions 每日回归 + README（架构图 / 用例清单 / 耗时口径） | 🚧 workflow（含 SUT + 平台两个服务）与 README 已完成并本地逐条验证；平台冒烟 26 条已完成；**⚠️ 推送被阻断（github.com:443 不可达）且 origin 指向上游仓库，Actions 尚未真实触发 —— 需你先解决远端** |
+| 阶段 4 | GitHub Actions 每日回归 + README（架构图 / 用例清单 / 耗时口径） | ✅ **CI 已上线并全绿（run #5 success）**；平台冒烟 26 条已完成（本地套件，原因见 9.15③）；浅克隆与 requests 漏声明两条缺陷已修（9.15①②） |
 
 ### 4.2 文件变更
 
@@ -682,6 +682,9 @@ README 里明确写了「**不用这个数字去和上游比快了多少倍**」
 > ⚠️ 诚实声明：workflow 的 YAML 语法、`seed.py --reset`、`run.py` 就绪探测、
 > `--junitxml` 与 pytest-html 同时使用，**都在本地逐条实跑验证过**；
 > 但**尚未在 GitHub Actions 上真实触发**。首次请手动 Run workflow 确认。
+>
+> 【后续已解决】这一条仅记录当时状态：CI 已于后续上线并**全绿（run #5 success）**，
+> 详见 9.15。此处保留原文不改写，以维持变更记录的时间顺序。
 
 ### 9.13 平台冒烟套件（test_09，26 条）与平台侧实测发现（第 14 个提交）
 
@@ -872,6 +875,88 @@ git push -u origin main
 
 按你的判断执行 —— 本地合并没有成本，而且 `main` 应该是**完整状态**；
 我原先"不想堆推不出去的提交"的顾虑只对**继续开发新功能**成立，这批本来就是同一批。
+
+### 9.15 CI 上线（run #5 全绿）与两条由 CI 暴露的真实缺陷（第 17 个提交）
+
+**状态**：CI 已上线并**全绿** —— `run #5, conclusion=success`
+（仓库：https://github.com/WonderSeeker/LunarLink，本地 main 与 origin/main 完全同步，116 个提交）。
+
+> 以下 ①②两项的修复由仓库所有者完成，这里按事实归档；③④的文档同步由本轮补上。
+
+#### ① ★ 浅克隆导致无法推送（网络之外的第二个拦路虎）
+
+**现象**：`git push` 报 `remote: fatal: did not receive expected object <sha>`，
+而那个 sha **本地不存在**，`git fsck` 又报**干净**。
+
+**根因**：`D:\Projects\LunarLink` 是上游的 `--depth 1` **浅克隆**
+（`.git/shallow` 存在、`git rev-parse --is-shallow-repository` = true，
+可追溯提交只有 21 个）。在浅克隆里"缺失的历史"属于**预期缺失**，
+所以 `fsck` 查不出来 —— **这两个事实同时成立，就是定位它的唯一线索**。
+（我此前把 push 失败**只**归因于网络封锁，漏了这一层；浅克隆这件事我没查。）
+
+**修法**：`git fetch --unshallow upstream` —— 走 ghproxy 即可，**不需要 github.com 可达**。
+
+**量化**：21 → 112 提交；pack 体积只从 **12.22 MiB 涨到 13.46 MiB**
+（delta 压缩把历史版本吃掉了，代价极小）。
+
+**已写入 README 快速开始**：用 `--depth 1` 克隆的仓库，push 前先 `git fetch --unshallow`。
+
+#### ② ★ `requirements-test.txt` 漏声明 `requests`（CI 才暴露的依赖缺口）
+
+**现象**：CI 里 `conftest.py:23` **导入期** `ModuleNotFoundError: No module named 'requests'`，
+整个套件在**收集期**就崩；而本地 175 条全绿。
+
+**根因**：`conftest.py` 与 `utils/client.py` 直接 `import requests`，
+但 `requirements-test.txt` **没有声明它**。本地 venv 里恰好有
+`backend/requirements.txt` 装进来的 `requests==2.28.2`，把缺口掩盖了；
+CI 只装测试依赖，于是暴露。
+
+**修法**：在 `requirements-test.txt` 显式加 `requests`。
+
+**系统性核对结论**（逐个比对测试与 sut 代码的全部 import 与依赖声明）：
+只有 `requests` 是**真缺失**；`allure` / `referencing` / `starlette` 分别是
+`allure-pytest` / `jsonschema` / `fastapi` 的**传递依赖**，`sut` 是项目自身包。
+
+**教训（已写进文件注释）**：**测试代码直接 import 的包必须在测试依赖里显式声明，
+不能指望传递依赖** —— 因为"本地恰好装过"和"CI 真的装了"是两回事。
+
+> 这条对本地全绿、CI 全红的现象特别有解释力：本地开发环境**从来不是**干净环境。
+> 这也解释了为什么"本地 201 条全绿"不能替代 CI 的一次真实运行。
+
+#### ③ CI / 部署说明的补充（两处）
+
+**a) 平台冒烟（test_09，26 条）不在 CI 运行**
+
+原因：跑它必须启动 `backend/`（Django），也就必须装 `backend/requirements.txt`；
+而 `requirements-test.txt` 规定**两者完全隔离**。
+**实测**：把两者合并装进同一环境后，`sut/seed.py --reset` 直接失败（依赖集冲突）。
+
+所以当前它定位为**【本地套件】**：`cd lunarlink_tests; ..\backend\.venv\Scripts\python.exe -m pytest -m platform`
+
+要放进 CI 的**正确做法**：新增**独立 job + 独立虚拟环境**（不能与本 job 共用），
+在该 job 装 `backend/requirements.txt`、启动平台、再跑 `-m platform`。
+已知坑：`mysqlclient` 需要系统 `libmysqlclient-dev`（或用 SQLite 时先剔除该行）。
+**已写进 workflow 文件末尾的注释**。
+
+**b) workflow 新增两种能力**
+
+- **push 触发器**（`branches: [main]`，`paths-ignore` 掉 `**.md` 与 `screenshots/**`）——
+  纯文档改动不浪费 Actions 配额。
+- **失败时把 pytest 尾部 40 行发成 GitHub annotation** —— 因为 workflow 运行日志的
+  **下载接口需要认证**（匿名请求 403），而 annotation 在公开仓库上**可匿名读取**，
+  便于排查。这个设计很实用：把"需要权限才能看的日志"转成了"匿名可见的注解"。
+
+#### ④ 顺带修掉两处我留下的文档不一致（本轮）
+
+1. **workflow 头部注释与正文不符**：头部仍写「CI 要起**两个服务**」并描述平台启动的两个坑，
+   但 `b2cede4`/`ef4a5db` 已把平台步骤移除。已改为「本 job 只跑 sut/」，
+   并把平台启动的两个坑**标注为"将来新增 platform job 时才需要处理"**（知识保留，但不再误导）。
+2. **README 里一句已被证伪的论断**：我原先写「CI 默认用 SQLite 跑，于是这个可移植性缺陷
+   **每天都会被自动暴露一次**」。平台冒烟移出 CI 后，CI **根本不碰**那些端点，
+   这句话就不成立了。已更正为：该缺陷是**本地平台冒烟套件在 SQLite 上跑**时暴露的，
+   并显式标注「CI 目前不跑平台冒烟」。
+   > 这是一类很典型的**文档腐化**：结论曾经成立，前提变了却没人回头改。
+   > 记在这里提醒自己：**改动某个机制时，要回头搜一遍依赖该机制的表述**。
 
 **两处对原设计的偏差（需知悉）**
 

@@ -5,27 +5,29 @@
 # 触发方式：
 #   * schedule          —— 每日 UTC 18:00（北京 02:00）跑一次
 #   * workflow_dispatch —— 在 Actions 页面手动点 "Run workflow"
+#   * push (main)       —— 推送到 main 时跑；纯文档/截图改动不触发（paths-ignore）
 #
 # 产物（都可在 Actions 页面的 Artifacts 里下载）：
 #   1. regression-report-allure/  —— Allure HTML（可直接打开）
 #   2. regression-report-pytest/  —— pytest-html 自包含 HTML（本地也能看）
 #   3. logs/                      —— SUT 启动日志与 /health 快照（排障用）
 #
-# ★ 关于两个被测对象（重要）
-#   本仓库的套件同时测两个东西，所以 CI 要起【两个服务】：
+# ★ 本 job 只跑【一个】被测对象：sut/（FastAPI mock 电商，175 条）
 #
-#     1) sut/        FastAPI mock 电商  :8021   → test_00 ~ test_08（175 条，业务套件）
-#     2) backend/    LunarLink 平台本体 :8001   → test_09（26 条，平台冒烟，platform marker）
+#   本仓库的套件其实覆盖两个被测对象，但本 job 只起 sut/：
+#     1) sut/      :8021  → test_00 ~ test_08（175 条）  ← 本 job 跑这个
+#     2) backend/  :8001  → test_09（26 条，platform）  ← 【不在本 job】，原因见
+#                                                          下面 step 里的说明与文件末尾
 #
 #   SUT 启动时必须带 SUT_ENABLE_TEST_HOOKS=1，否则依赖测试后门的用例
 #   （过期 token、锁定到期）会因为拿不到后门而 skip —— 那是一种「假的绿色」。
 #
-#   平台侧启动有两个坑，都是实测踩出来的（见下面各 step 的注释）：
+# ★ 如果将来你想加一个 job 去跑平台冒烟，下面两个坑必须处理（都实测踩过）：
 #     a) backend/.env 被 gitignore，CI 里不存在，而 conf/env.py 里有
 #        `PROXY_PORT = int(os.getenv("PROXY_PORT"))`（无默认值）→ 缺它直接 ImportError。
 #        所以要先 `cp .env.example .env`。
 #     b) 但 .env.example 的 REDIS_ON/PROXY_ON 是 True（本地 .env 是 False），
-#        直接用会去连本地没有的 Redis/MQ。所以这几个开关必须在 job env 里显式覆盖。
+#        直接用会去连本地没有的 Redis/MQ。所以这几个开关要在 job env 里显式覆盖。
 #        （load_dotenv() 默认不覆盖已存在的环境变量，所以 job env 优先级更高。）
 # ============================================================================
 

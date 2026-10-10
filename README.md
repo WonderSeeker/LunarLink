@@ -273,6 +273,19 @@ cd D:\Projects ; .\svc.ps1 stop sut,lunar-be
 
 ★ 必须用 `python -m pytest`（而不是裸 `pytest`），确保用的是 `backend/.venv` 的解释器。
 
+★ **浅克隆陷阱（推代码前必看，真踩过）**：若你用 `git clone --depth 1` 克隆本仓库（或任何
+用来当 push 源的仓库），**push 之前必须先补全历史**：
+
+```powershell
+git fetch --unshallow upstream     # 走 ghproxy 即可，不需要 github.com 可达
+```
+
+否则 push 会报 `remote: fatal: did not receive expected object <sha>`，而**那个 sha 本地不存在、
+`git fsck` 又报干净** —— 因为浅克隆里"缺失的历史"属于**预期缺失**，fsck 查不出来。
+这两个事实同时成立，就是定位它的唯一线索。
+（`--unshallow` 的代价很小：实测 21 → 112 提交，pack 只从 12.22 MiB 涨到 13.46 MiB，
+delta 压缩把历史版本吃掉了。）
+
 ## 5. 用例清单（201 条 = 业务套件 175 + 平台冒烟 26）
 
 | 文件 | 条数 | 覆盖内容 |
@@ -372,34 +385,45 @@ MVCC 数据库（MySQL InnoDB / PostgreSQL）下的竞争表现**。它们真正
 
 ## 10. CI：每日回归
 
-`.github/workflows/daily-regression.yml`：**每日 UTC 18:00（北京 02:00）自动跑 + 支持手动触发**。
+`.github/workflows/daily-regression.yml`：**每日 UTC 18:00（北京 02:00）自动跑 + 支持手动触发 +
+push 到 main 时跑**（纯文档与 `screenshots/**` 改动不触发）。
 
-流程：检出 → 装 Python 3.10 + 测试依赖 → `python sut/seed.py --reset` 重建 SUT 数据 →
-后台起 SUT（带 `SUT_ENABLE_TEST_HOOKS=1`）→ 轮询 `/health` 就绪 →
-**`cp .env.example .env` + `manage.py migrate` + `ensure_smoke_user`** →
-后台起平台（`runserver 127.0.0.1:8001 --noreload`）→ 轮询就绪 → 执行 pytest（201 条）→
-生成 Allure HTML → 上传 artifact（Allure 报告 + pytest-html + `junit.xml` + 两个服务的日志）。
+> ★ **CI 跑的是 175 条业务套件，不是 201 条。** 平台冒烟（26 条）目前是**本地套件**，
+> 原因见下方「若要给平台冒烟也上 CI」。
 
-平台侧的三个必设项（都是实测踩出来的，缺一项 CI 就会红）：
+流程：检出 → 装 Python 3.10 + 测试依赖（只装 `backend/requirements-test.txt`）→
+`python sut/seed.py --reset` 重建 SUT 数据 → 后台起 SUT（带 `SUT_ENABLE_TEST_HOOKS=1`）→
+轮询 `/health` 就绪 → `pytest -m "not platform"` → 生成 Allure HTML →
+上传 artifact（Allure 报告 + pytest-html + `junit.xml` + SUT 日志）。
 
-| 设置 | 为什么 |
+三个刻意的选择：
+
+- **测试依赖与后端运行依赖分文件**（CI 只装 `requirements-test.txt`）。这不是图省事：
+  该文件头部明确写着「与 `backend/requirements.txt` 完全隔离、禁止合并」，
+  实测把两者装进同一环境后连 `sut/seed.py --reset` 都会失败（依赖集冲突）。
+- **生成 Allure HTML 后不加 `|| true`**：报告流水线坏掉本来就该是红的；
+  加了会出现「测试全绿但报告悄悄没了」这种最坏情况。
+- **失败时把 pytest 尾部 40 行发成 GitHub annotation**：workflow 运行日志的下载接口需要认证
+  （匿名请求会被 403），而 annotation 在公开仓库上**可匿名读取** ——
+  这样没有仓库权限的排查者不登录也能看到失败摘要。
+
+> ★ 已实测通过：**run #5 `conclusion=success`**（仓库：https://github.com/WonderSeeker/LunarLink）。
+> 该次运行由仓库所有者触发。
+
+### 若要给平台冒烟也上 CI
+
+正确做法是**新增一个独立 job + 独立虚拟环境**（不能与本 job 共用环境，否则依赖集冲突），
+在那个 job 里装 `backend/requirements.txt`、启动平台、再跑 `-m platform`。
+三个已知的坑（都已写在 workflow 头部注释里）：
+
+| 坑 | 说明 |
 |---|---|
-| `cp .env.example .env` | `backend/.env` 被 gitignore（CI 里不存在），而 `conf/env.py` 在 import 期执行 `PROXY_PORT = int(os.getenv("PROXY_PORT"))`，**无默认值**，缺它 Django 根本起不来 |
-| `DATABASE_ENGINE=sqlite` | `settings.py` 里它默认是 `mysql`；CI 没有 MySQL |
-| `REDIS_ON=False` / `PROXY_ON=False` | `.env.example` 里是 `True`（本地 `.env` 是 `False`），不覆盖就会去连本地不存在的 Redis / 录制代理 |
+| `cp .env.example .env` | `.env` 被 gitignore（CI 里不存在），而 `conf/env.py` 在 import 期执行 `PROXY_PORT = int(os.getenv("PROXY_PORT"))`，**无默认值**，缺它 Django 根本起不来 |
+| `DATABASE_ENGINE=sqlite` | `settings.py` 里默认是 `mysql`；CI 没有 MySQL |
+| `REDIS_ON=False` / `PROXY_ON=False` | `.env.example` 里是 `True`（本地 `.env` 是 `False`），不覆盖就会去连不存在的 Redis / 录制代理。另外 `mysqlclient` 需要系统的 `libmysqlclient-dev`，用 SQLite 时应先剔除该行 |
 
 > `load_dotenv()` 默认**不覆盖**已存在的环境变量，所以 job 级 `env:` 的优先级高于 `.env`
 > —— 这一点已在本机实测确认，不是照文档推断的。
-
-两个刻意的选择：
-
-- **测试依赖与后端运行依赖分文件**（`requirements-test.txt`），CI 只装前者，装得更快也互不影响。
-- **生成 Allure HTML 后不加 `|| true`**：报告流水线坏掉本来就该是红的；
-  加了会出现「测试全绿但报告悄悄没了」这种最坏情况。
-
-> ⚠️ 诚实声明：workflow 的 YAML 语法与依赖命令已在本地逐条验证
-> （`--junitxml` 与 pytest-html 同时使用、`seed.py --reset`、`run.py` 就绪探测均已实跑），
-> 但**尚未在 GitHub Actions 上真实触发过** —— 首次运行请在 Actions 页面点一次 Run workflow 确认。
 
 ## 11. 平台冒烟套件（Platform Smoke）
 
@@ -435,9 +459,11 @@ python manage.py ensure_smoke_user      # 幂等：建非管理员账号 + 管�
 > 关于 `xfail(strict=True)` 的写法：用例体断言的是**正确行为（200）**，不是"应该 500"。
 > 方向写反会变成 `XPASS(strict)` 报错 —— 我第一版就写反了，实测才发现。
 
-> ★ **一个正面副作用**：CI 默认用 SQLite 跑（因为 CI 上没有 MySQL），于是**这个可移植性缺陷
-> 每天都会被自动暴露一次**。如果 CI 用 MySQL，它会被完全掩盖 —— 这正是"在 CI 里保持与
-> 本地一致的、更弱的依赖环境"的价值。
+> ★ **这个缺陷为什么能被发现**：它是**本地平台冒烟套件在 SQLite 上跑**时暴露的。
+> 若只在 MySQL 上验证，这个可移植性缺陷会被完全掩盖 —— 这正是"在更弱的依赖环境上
+> 再跑一遍"的价值。
+> ⚠️ 注意：**CI 目前不跑平台冒烟**（见第 10 节），所以它**不是**由 CI 每日暴露的
+> —— 这一条我原先写反过（当时计划把平台放进 CI，后来因依赖集冲突移出），特此更正。
 
 > ★ **一次我自己犯的归因错误**：初判时我看到这三个端点都 500，又在 `prepare.py`/`VisitView`
 > 里看到 MySQL 专有 SQL，就把它们归为**同一个原因**。抓真实 traceback 后才发现是
