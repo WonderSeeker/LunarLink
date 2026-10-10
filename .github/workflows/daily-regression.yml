@@ -53,7 +53,7 @@ permissions:
 
 jobs:
   regression:
-    name: 接口回归（SUT 175 条 + 平台冒烟 26 条）
+    name: 接口回归（SUT 175 条）
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -66,32 +66,17 @@ jobs:
         with:
           python-version: "3.10"
           cache: pip
-          cache-dependency-path: |
-            backend/requirements-test.txt
-            backend/requirements.txt
+          cache-dependency-path: backend/requirements-test.txt
 
       - name: 安装测试依赖
         run: |
           python -m pip install --upgrade pip
-          # 测试套件自己的依赖（pytest / requests / allure / jsonschema / mock SUT）
+          # ★ 只装测试依赖；backend/requirements.txt 是后端运行环境，CI 不需要。
+          #   这不是图省事：requirements-test.txt 头部明确写着
+          #   「与 backend/requirements.txt 完全隔离，禁止合并（后者是后端运行时依赖）」。
+          #   实测把两者装进同一个环境后，原本能过的 `sut/seed.py --reset` 直接失败
+          #   —— 依赖集冲突。平台冒烟（test_09）因此不放在本 job，见文件末尾说明。
           pip install -r backend/requirements-test.txt
-          pip list
-
-      - name: 安装平台运行时依赖
-        run: |
-          # ★ 本 job 里既有 SUT 套件（175 条）也有平台冒烟（test_09，26 条），
-          #   所以平台（Django）也必须能起来 —— 后面会跑 manage.py migrate 与 runserver。
-          #
-          #   backend/requirements.txt 是平台的运行时依赖，但它含 mysqlclient==2.1.1：
-          #   在 ubuntu runner 上编译它需要 libmysqlclient-dev（默认没有）。
-          #   而 CI 用的是 DATABASE_ENGINE=sqlite，根本不需要这个驱动 —— 先剔除再装。
-          #   若将来要把 CI 切到 MySQL，则改为：
-          #     sudo apt-get install -y default-libmysqlclient-dev pkg-config
-          #   然后直接 pip install -r backend/requirements.txt
-          grep -v -iE '^\s*mysqlclient' backend/requirements.txt > /tmp/requirements-platform.txt
-          echo "--- 已剔除 mysqlclient 后的行数 ---"
-          wc -l < /tmp/requirements-platform.txt
-          pip install -r /tmp/requirements-platform.txt
           pip list
 
       - name: 重建 SUT 数据库并灌种子数据
@@ -118,45 +103,16 @@ jobs:
           cat logs/sut.out
           exit 1
 
-      - name: 准备平台数据库与冒烟账号
-        env:
-          # ★ settings.py 里 DATABASE_ENGINE 默认是 mysql；CI 没有 MySQL，必须显式给 sqlite
-          DATABASE_ENGINE: sqlite
-          # 与「已知可用的本地 .env」对齐，避免去连不存在的 Redis / 录制代理
-          REDIS_ON: "False"
-          PROXY_ON: "False"
-          PROXY_PORT: "7778"
-        working-directory: backend
-        run: |
-          # ★ 必须先有 .env：conf/env.py 在 import 期就会执行
-          #   `PROXY_PORT = int(os.getenv("PROXY_PORT"))`，缺它直接崩，Django 起不来。
-          cp .env.example .env
-          python manage.py migrate --noinput
-          # 幂等地准备两个冒烟账号：非管理员（主力）+ 管理员（admin-only 端点）
-          python manage.py ensure_smoke_user
-
-      - name: 启动平台并等待就绪
-        env:
-          DATABASE_ENGINE: sqlite
-          REDIS_ON: "False"
-          PROXY_ON: "False"
-          PROXY_PORT: "7778"
-        run: |
-          cd backend
-          nohup python manage.py runserver 127.0.0.1:8001 --noreload > ../logs/lunar-be.out 2>&1 &
-          echo "平台已在后台启动（pid=$!）"
-          for i in $(seq 1 40); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8001/login/ || true)
-            # /login/ 只接受 POST，GET 会回 405 —— 只要不是 000，就说明服务已起来
-            if [ "$code" != "000" ] && [ -n "$code" ]; then
-              echo "平台就绪（第 ${i} 次探测，HTTP $code）"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "::error::LunarLink 平台在 40 秒内没有就绪"
-          cat ../logs/lunar-be.out
-          exit 1
+      # ---------------------------------------------------------------- 平台冒烟
+      # ★ 平台冒烟（test_09，26 条，marker = platform）【不在本 job 运行】。原因：
+      #     要跑它必须启动 backend/（Django），也就必须装 backend/requirements.txt；
+      #     而 requirements-test.txt 明确规定「与 backend/requirements.txt 完全隔离、
+      #     禁止合并」。实测合并后依赖集冲突，连 SUT 的 seed.py 都会失败。
+      #   所以本 job 只跑 SUT 业务套件（175 条），pytest 默认加 `-m "not platform"`。
+      #   平台冒烟目前是【本地套件】：cd lunarlink_tests; ..\backend\.venv\Scripts\python.exe -m pytest -m platform
+      #   若要在 CI 也跑它，正确做法是【新增一个独立 job】，在该 job 里单独建虚拟环境、
+      #   装 backend/requirements.txt（注意 mysqlclient 需要 libmysqlclient-dev，
+      #   或改用 sqlite 时先剔除该行），再启动平台。
 
       - name: 执行 pytest
         working-directory: lunarlink_tests
@@ -169,8 +125,11 @@ jobs:
             echo ">>> 只跑 marker: $MARKER"
             python -m pytest $COMMON -m "$MARKER"
           else
-            echo ">>> 全量执行"
-            python -m pytest $COMMON
+            # ★ 默认排除 platform：平台冒烟需要后端完整运行时依赖，本 job 只装测试依赖
+            #   （requirements-test.txt 明确要求与 backend/requirements.txt 隔离）。
+            #   想在 CI 里跑 marker=platform，请见本文件末尾的说明。
+            echo ">>> 全量执行（不含 platform）"
+            python -m pytest $COMMON -m "not platform"
           fi
 
       - name: 生成 Allure HTML
