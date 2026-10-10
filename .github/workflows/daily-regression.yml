@@ -123,14 +123,28 @@ jobs:
           MARKER="${{ github.event.inputs.marker }}"
           if [ -n "$MARKER" ]; then
             echo ">>> 只跑 marker: $MARKER"
-            python -m pytest $COMMON -m "$MARKER"
+            set +e
+            python -m pytest $COMMON -m "$MARKER" 2>&1 | tee pytest.out
+            code=${PIPESTATUS[0]}
           else
             # ★ 默认排除 platform：平台冒烟需要后端完整运行时依赖，本 job 只装测试依赖
             #   （requirements-test.txt 明确要求与 backend/requirements.txt 隔离）。
             #   想在 CI 里跑 marker=platform，请见本文件末尾的说明。
             echo ">>> 全量执行（不含 platform）"
-            python -m pytest $COMMON -m "not platform"
+            set +e
+            python -m pytest $COMMON -m "not platform" 2>&1 | tee pytest.out
+            code=${PIPESTATUS[0]}
           fi
+          # ★ 失败时把尾部摘要发成 annotation：workflow 运行日志的下载接口需要认证，
+          #   而 annotation 在公开仓库上是可以被匿名读取的 —— 这样排查不必依赖本地权限。
+          if [ "$code" -ne 0 ]; then
+            echo "===== pytest 失败摘要（最后 40 行）====="
+            tail -n 40 pytest.out
+            tail -n 40 pytest.out | while IFS= read -r line; do
+              [ -n "$line" ] && echo "::error::$line"
+            done
+          fi
+          exit "$code"
 
       - name: 生成 Allure HTML
         if: always()
