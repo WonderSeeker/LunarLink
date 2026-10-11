@@ -329,7 +329,8 @@ class VisitView(GenericViewSet):
             .filter(
                 project=project, create_time__range=(day.get_day(-7), day.get_day())
             )
-            .extra(select={"create_time": "DATE_FORMAT(create_time, '%%m-%%d')"})
+            # ★ 原为写死的 DATE_FORMAT（MySQL 专有）→ 改为按方言生成，SQLite 下也能跑
+            .extra(select={"create_time": prepare.date_format_sql("create_time", "%%m-%%d")})
             .values("create_time")
             .annotate(counts=Count("id"))
             .values("create_time", "counts")

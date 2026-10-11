@@ -302,7 +302,7 @@ delta 压缩把历史版本吃掉了。仓库现在已有 117 个提交 —— *
 | `test_08_security.py` | 18 | 水平越权 404、垂直越权 403、token 矩阵、信息泄露、参数注入 |
 | **业务套件小计** | **175** | 174 passed + 1 skipped（唯一 skip 是刻意用来验证 skip 呈现的用例） |
 | `test_09_lunarlink_smoke.py` | 26 | **平台冒烟**（另一个被测对象）：认证头契约、只读端点信封、业务错误码、权限边界、轻量写闭环、3 条已知缺陷 xfail |
-| **合计** | **201** | 197 passed + 1 skipped + 3 xfailed |
+| **合计** | **201** | 200 passed + 1 skipped |
 
 **场景类型分布**（按 marker 统计，一条用例可带多个标记）：`security` 40 / `negative` 36 /
 `smoke` 33 / `regression` 23 / `boundary` 13 / `concurrency` 6 / `platform` 26。
@@ -469,19 +469,28 @@ python manage.py ensure_smoke_user      # 幂等：建非管理员账号 + 管�
 | **业务错误用 HTTP 200 表达** | `GET /project/999999` → **200** + `{"code":"0102","success":false}`。所以只断状态码的用例在这里会"假通过"，必须双层断言 |
 | **`POST /project` 要求 `desc` 与 `responsible`** | 二者是 `CharField(null=False)` 且无 `default`/`blank` → ModelSerializer 里成为必填。只传 `name` 会得到 `{"code":"9999","msg":"System Error"}` |
 | ★ **缺字段时报 `9999 System Error`** | 不说是哪个字段、也不回 400，调用方只能翻源码。已写成断言并注明"这不是预期行为"，上游改进后会失败提醒 |
-| ★ **可移植性缺陷**：`/dashboard`、`/visit` 在 SQLite 下 500 | 平台声明支持 SQLite（`settings.py` 有 `DATABASE_ENGINE=sqlite` 开关），但 **2 处代码**使用了 MySQL 专有 SQL，导致 SQLite 模式下返回 500：`utils/prepare.py` 的 `aggregate_reports_or_case_bydate`（`DATE_FORMAT`/`YEARWEEK`）与 `views/project.py` 的 `VisitView.list`（`DATE_FORMAT`）→ `OperationalError: no such function: DATE_FORMAT`。用 `xfail(strict=True)` 显式记录 |
-| ★ **独立的 None 处理缺陷**：`/reports` 不传 `search` 就 500 | **与数据库无关**（MySQL 下同样会坏）：`report.py` 的 `search = request.query_params.get("search")` 未传参时是 `None`，而守卫写的是 `if search != ""`（`None != ""` 成立）→ `filter(name__contains=None)` → `ValueError: Cannot use None as a query value` |
+| ★ **可移植性缺陷（已修复）**：`/dashboard`、`/visit`、`/project/<pk>` 在 SQLite 下 500 | 平台声明支持 SQLite（`settings.py` 有 `DATABASE_ENGINE=sqlite` 开关），但多处代码写死了 MySQL 专有的 `DATE_FORMAT` / `YEARWEEK` → `OperationalError: no such function: DATE_FORMAT`。<br>**本仓库已修**：新增 `prepare.date_format_sql()` / `date_week_sql()` 按 `connection.vendor` 生成方言对应的 SQL（SQLite 用 `strftime`）。最初是用 `xfail(strict=True)` 记录缺陷；**修好后它们如设计般 XPASS 报警**，于是改造成了 `TestSqliteCompatibility` 回归守卫 |
+| ★ **独立的 None 处理缺陷（已修复）** | **与数据库无关**（MySQL 下同样会坏）：`report.py` 的 `search = request.query_params.get("search")` 未传参时是 `None`，而守卫写的是 `if search != ""`（`None != ""` 成立）→ `filter(name__contains=None)` → `ValueError` → 报告列表 500。已改为真值判断，并留了 `TestReportListParamHandling` 守卫（不传 / 传 search 两条分支都走） |
 | ★ **错误告警中间件掩盖真实异常** | 上面三个端点的 500 页面显示的**都不是**真实异常，而是 `MissingSchema: Invalid URL ''` —— 因为 `backend/utils/middleware.py` 的 `process_exception` 会去发企业微信告警（`qy_message.send`），而 `QY_WEB_HOOK` 是空串 → `requests.post("")` 直接抛错，把原始异常顶掉。排障时会被引向完全错误的方向 |
 | **`ENABLE_LOGIN_ANALYSIS_LOG` 是死配置** | `conf/env.py` 把它**硬编码为 `True`**，不读环境变量，`.env` 里写 `False` 无效。它会让 `/api/user/login` 每次登录都去调外部 IP 归属地 API（timeout 5s）。本套件统一走 `/login/`（DRF-JWT），**不经过那段调用**，所以不受影响 |
 
 > 关于 `xfail(strict=True)` 的写法：用例体断言的是**正确行为（200）**，不是"应该 500"。
 > 方向写反会变成 `XPASS(strict)` 报错 —— 我第一版就写反了，实测才发现。
+> **而且它真的按设计报警了**：本仓库把这两个缺陷修好之后，那 3 条 xfail 立刻变成
+> `XPASS(strict)` 失败，提醒把它们改造成正向守卫 —— 这就是"用 strict 记录缺陷"的回报。
 
 > ★ **这个缺陷为什么能被发现**：它是**本地平台冒烟套件在 SQLite 上跑**时暴露的。
 > 若只在 MySQL 上验证，这个可移植性缺陷会被完全掩盖 —— 这正是"在更弱的依赖环境上
 > 再跑一遍"的价值。
 > ⚠️ 注意：**CI 目前不跑平台冒烟**（见第 10 节），所以它**不是**由 CI 每日暴露的
 > —— 这一条我原先写反过（当时计划把平台放进 CI，后来因依赖集冲突移出），特此更正。
+
+> ★★ **修这类缺陷时，真正的风险不是 500，而是"静默算错"**：
+> 如果只把 `DATE_FORMAT` 机械换成 `strftime` 而没管转义，SQLite 会把 `'%%m-%%d'`
+> 当**字面量**输出 `"%m-%d"`，标签与日期列表对不上 → 统计数**静默全 0**：
+> 不报错、但结果是错的，比直接 500 更难发现。
+> 所以修复后专门验证了**标签本身算得对不对**（`day` 分组得到 `'10-11'`、
+> `month` 得到 `'202610'`），而不是只看"不报 500 了"。
 
 > ★ **一次我自己犯的归因错误**：初判时我看到这三个端点都 500，又在 `prepare.py`/`VisitView`
 > 里看到 MySQL 专有 SQL，就把它们归为**同一个原因**。抓真实 traceback 后才发现是

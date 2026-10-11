@@ -153,13 +153,17 @@ class ReportView(GenericViewSet):
         if only_me == "true":
             queryset = queryset.filter(creator=request.user)
 
-        if search != "":
+        # ★ 原为 `!= ""`：未传该参数时 query_params.get() 得到的是 None，而 `None != ""` 成立，
+        #   于是执行 `filter(name__contains=None)` → ValueError: Cannot use None as a query value
+        #   → 整个「历史报告」列表 500。改成真值判断即可同时覆盖 None 与 ""。
+        #   （与数据库无关：MySQL 下同样会坏。）
+        if search:
             queryset = queryset.filter(name__contains=search)
 
-        if report_type != "":
+        if report_type:
             queryset = queryset.filter(type=report_type)
 
-        if report_status != "":
+        if report_status:
             queryset = queryset.filter(status=report_status)
 
         page_report = self.paginate_queryset(queryset)

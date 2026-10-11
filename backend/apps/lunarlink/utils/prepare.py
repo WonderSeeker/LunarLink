@@ -18,6 +18,7 @@ import requests
 from collections import defaultdict
 from typing import Dict, List, Tuple
 
+from django.db import connection
 from django.db.models import Count, Model, F, Q
 from django.db.models.query import QuerySet
 from django.core.exceptions import ObjectDoesNotExist
@@ -39,16 +40,59 @@ def project_init(project, creator):
     models.Debugtalk.objects.create(project=project, creator=creator)
 
 
-def get_sql_dateformat(date_type: str) -> str:
-    create_time = ""
-    if date_type == "week":
-        create_time = "CAST(YEARWEEK(create_time, 1) AS CHAR)"
-    elif date_type == "month":
-        create_time = "DATE_FORMAT(create_time, '%%Y%%m')"
-    elif date_type == "day":
-        create_time = "DATE_FORMAT(create_time, '%%Y-%%m-%%d')"
+def _is_sqlite() -> bool:
+    """当前数据库是不是 SQLite。
 
-    return create_time
+    ★ 为什么要判断：本仓库用 DATABASE_ENGINE 环境开关支持两套数据库，
+      生产是 MySQL、本地/CI 是 SQLite，同一段统计 SQL 得两套写法。
+    """
+    return connection.vendor == "sqlite"
+
+
+def date_format_sql(column: str, fmt: str) -> str:
+    """生成「把时间列按格式转成字符串」的 SQL，按数据库方言选择写法。
+
+    ★ 为什么需要它（这是本次修复的核心）：
+      原平台只考虑了 MySQL，直接写死 `DATE_FORMAT(...)`；而 SQLite 没有这个函数
+      （`OperationalError: no such function: DATE_FORMAT`）→ 所有用到日期统计的接口
+      在 SQLite 下必定 500（项目详情、项目看板、访问统计、报告列表）。
+      这里按方言生成，两种数据库都能跑。
+
+    参数 fmt 两个分支用同一套写法（沿用原代码的 MySQL 习惯，把 % 写成 %%）：
+        MySQL : DATE_FORMAT(col, '%%m-%%d')  → 驱动要求转义
+        SQLite: strftime('%%m-%%d', col)     → Django 的 SQLite 后端会把 %% 还原成 %
+      所以这里【不需要】为方言单独做转义，两边都写 %% 即可（已实测确认，见 CHANGES）。
+
+    ★ 为什么不能只改函数名就完事：如果 SQLite 分支把 '%%m-%%d' 原样发下去，
+      strftime 会把它当字面量输出 "%m-%d"，标签与 recent_days 对不上 →
+      统计数【静默全 0】：不报错、但结果是错的，比直接 500 更危险。
+      所以这条路径必须实测，而不是"改了能跑就行"。
+    """
+    if _is_sqlite():
+        return "strftime('{0}', {1})".format(fmt, column)
+    return "DATE_FORMAT({0}, '{1}')".format(column, fmt)
+
+
+def date_week_sql(column: str) -> str:
+    """生成「按周分组」的 SQL，按数据库方言选择写法。
+
+    MySQL:  YEARWEEK(col, 1)      —— 周一为一周开始，返回如 202641
+    SQLite: strftime('%Y%W', col) —— 同样是周一为一周开始，返回如 202641
+    （两者都是"标签字符串"，用于图表横轴，不参与排序计算，所以形状一致即可。）
+    """
+    if _is_sqlite():
+        return "strftime('%%Y%%W', {0})".format(column)
+    return "CAST(YEARWEEK({0}, 1) AS CHAR)".format(column)
+
+
+def get_sql_dateformat(date_type: str) -> str:
+    if date_type == "week":
+        return date_week_sql("create_time")
+    if date_type == "month":
+        return date_format_sql("create_time", "%%Y%%m")
+    if date_type == "day":
+        return date_format_sql("create_time", "%%Y-%%m-%%d")
+    return ""
 
 
 def get_recent_date(date_type) -> List:
@@ -283,7 +327,8 @@ def get_daily_count(project_id, model_name, start, end):
         query.filter(
             project_id=project_id, create_time__range=[get_day(start), get_day(end)]
         )
-        .extra(select={"create_time": "DATE_FORMAT(create_time,'%%m-%%d')"})
+        # ★ 原为写死的 DATE_FORMAT（MySQL 专有）→ 改为按方言生成，SQLite 下也能跑
+        .extra(select={"create_time": date_format_sql("create_time", "%%m-%%d")})
         .values("create_time")
         .annotate(counts=Count("id"))
         .values("create_time", "counts")

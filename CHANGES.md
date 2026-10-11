@@ -1293,6 +1293,123 @@ repr = b'\xef\xbb\xbfdocs: 缩小 9.18 的证…'      # 239,187,191 = UTF-8 BOM
 ```
 （本行即那个带 BOM 的标题。**我不改写历史**，所以它保持原样留在这里作为记录。）
 
+### 9.20 修复 SQLite 可移植性缺陷（让平台在 SQLite 下真正可用）+ 一处自我更正
+
+#### ① 起因：在界面上撞墙
+
+仓库所有者按我的指引打开前端，走到「进入项目 → 接口管理」时报 **服务器异常**。
+查日志得到两个 500：
+
+```
+GET /api/lunarlink/project/22    → 500      ← 进项目时的项目详情/概览
+GET /api/lunarlink/visit?project=22 → 500   ← 项目看板的访问统计
+```
+
+根因链（日志原文）：
+
+```
+ProjectView.single
+  → prepare.get_project_detail_v2  (prepare.py:322)
+    → prepare.get_project_daily_create (prepare.py:308)
+      → prepare.get_daily_count        (prepare.py:293)
+        → sqlite3.OperationalError: no such function: DATE_FORMAT
+```
+
+即**原平台只考虑了 MySQL**，在统计"最近 6 天每天创建了多少"时写死了 `DATE_FORMAT`。
+本仓库按 `DATABASE_ENGINE=sqlite` 运行 → **进项目就必 500**，平台的**核心页面根本打不开**。
+
+> 注意这与 9.17 发现的那批是**同一类缺陷的新实例**：
+> 之前发现的是 `/dashboard`、`/visit`（以及被我误归因的 `/reports`），
+> 这次是 `/project/<pk>`。**同一类缺陷会有多个实例**，修的时候要一起看。
+
+#### ② 顺带更正我自己的一个错误：`/tree` 没坏
+
+我在 9.17 后的沟通中把 `/tree/<pk>` 也列进了"500 端点"。**那是我探测时传错了参数**：
+
+```
+GET /api/lunarlink/tree/22?type=1     → 200 ✓   ← 前端实际用的是 type=1
+GET /api/lunarlink/tree/22?type=api   → 500     ← 我用了字符串，pydantic 校验失败
+pydantic.error_wrappers.ValidationError: 1 validation error for TreeUniqueIn
+```
+
+`type` 要的是整数。**`/tree` 一直是好的。**
+（好消息：这个错误只出现在对话里，**没有写进 README/CHANGES** —— 我核对过。
+ 这条记在这里，是为了让"我错在哪"也留痕，而不是悄悄带过。）
+
+#### ③ 修复方案：SQL 按数据库方言生成
+
+**新增两个辅助函数**（`apps/lunarlink/utils/prepare.py`）：
+
+| 函数 | MySQL（原） | SQLite（新） |
+|---|---|---|
+| `date_format_sql(col, fmt)` | `DATE_FORMAT(col, '%%m-%%d')` | `strftime('%%m-%%d', col)` |
+| `date_week_sql(col)` | `CAST(YEARWEEK(col, 1) AS CHAR)` | `strftime('%%Y%%W', col)` |
+
+用 `connection.vendor == "sqlite"` 判断方言。**改动共 5 处表达式 / 2 个文件**：
+
+| 文件 | 改动 |
+|---|---|
+| `utils/prepare.py` | `get_sql_dateformat()`（周/月/日三处）改用上面两个函数 |
+| `utils/prepare.py` | `get_daily_count()` 里那处写死的 `DATE_FORMAT`（**就是本次 500 的那条**） |
+| `views/project.py` | `VisitView.list` 里那处写死的 `DATE_FORMAT` |
+| `views/report.py` | 顺带修独立缺陷：`if search != ""` → `if search:`（未传参时是 `None`） |
+
+> `%%` 的疑问我先按原代码写法保持一致，然后**实测确认**：Django 的 SQLite 后端
+> （`SQLiteCursorWrapper.convert_query` 会做 `.replace("%%", "%")`）会把它还原成 `%`，
+> 所以两种数据库都写 `%%` 即可，**不需要**为方言单独做转义 —— 我一开始加了个"还原"逻辑，
+> 想清楚后删掉了（不引入无依据的分支）。
+
+#### ④ ★ 验证：重点不是"不报 500"，而是"算出来的值对不对"
+
+这次有一个**比 500 更危险的失败模式**：如果 SQLite 分支的转义写错，
+`strftime` 会把 `'%%m-%%d'` 当字面量输出 `"%m-%d"`，标签与 `recent_days` 对不上 →
+统计数**静默全 0**：不报错、但结果是错的。
+
+所以验证分两层（用一张**有数据**的表 `project` 走同一条 `extra()` 路径）：
+
+```
+① 日期标签正确性
+   day   分组 → label='10-11'   counts=1      ← 真日期，不是字面量
+   month 分组 → label='202610'  counts=1
+② 之前 500 的 5 个请求全部恢复 200
+   /project/22 ✓  /visit?project=22 ✓  /dashboard ✓  /reports?project=22 ✓  /reports ✓
+③ 那 3 条 xfail(strict=True) 如设计般变成 XPASS 失败 → 提醒撤标记（见 ⑤）
+④ 全量回归：200 passed + 1 skipped（此前是 197 passed + 4 skipped）
+```
+
+> **如实标注一处局限**：标签正确性是用一次性脚本验证的，**没有做成自动化用例**。
+> 原因：要断言"当天创建的条数 ≥ 1"就得先造数据（创建 API/用例/报告），
+> 而 test_09 目前只做只读 + 轻量写（项目级）。这条已作为**将来可加的守卫**记在这里。
+
+#### ⑤ 把"记录缺陷"的用例改造成"修复的回归守卫"
+
+`strict=True` 按设计报警（3 条 XPASS → 失败）后，把它们改成正向用例：
+
+| 原 | 现 |
+|---|---|
+| `TestKnownPlatformDefectsPortability`（2 条 xfail） | `TestSqliteCompatibility`（2 条：断言 200，并在断言消息里写明"改回 MySQL 写法就会红"） |
+| `TestKnownPlatformDefectsNoneHandling`（1 条 xfail） | `TestReportListParamHandling`（1 条：**两条分支都走**——不传 search 与传 search，确认修好 None 分支且没写坏筛选分支） |
+
+用例总数**仍是 26**（3 条 → 3 条），所以 README / CI 里所有"26 条"的数字无需改动。
+> 刻意用"一条用例走两条分支"而不是 `parametrize` 拆两条：两者在语义上是同一件事
+> （这个视图的参数处理），且断言消息里带 `params`，失败时能定位是哪条。
+
+#### ⑥ 一个刻意**没有**做的改动（避免无意义的"统一"）
+
+顺手发现 `views/api.py` 与 `views/suite.py` 里也有同样的 `if xxx != "":` 写法，
+**但它们不是 bug**：那些值来自序列化器的 `validated_data`（字段有默认空串），
+永远不会是 `None`。而 `report.py` 用的是原始 `request.query_params.get()` 且无默认值 → 才是 bug。
+
+**没有为了"看起来统一"去改没有问题的代码** —— 那只会增加回归面。
+
+#### ⑦ 数字变化
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| 全量 | 197 passed + 4 skipped | **200 passed + 1 skipped** |
+| `/dashboard` `/visit` `/reports` `/project/<pk>` | 500 | **200** |
+| 平台可用性 | 进项目就打不开 | 项目概览/看板/报告页都能用 |
+
 **两处对原设计的偏差（需知悉）**
 
 1. **新增了 `POST /api/orders/{order_no}/ship`（admin 发货）** —— 原设计 6 个订单接口里没有它，
