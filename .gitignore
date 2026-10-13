@@ -25,5 +25,7 @@ report*.html
 junit.xml
 
 # 本地数据库（后端 SQLite 与 SUT SQLite，CI 中分别由 migrate 与 sut/seed.py 重建）
-/backend/lunarlink.sqlite3
-/sut/*.sqlite3
+# ★ 末尾的 * 是必需的：SQLite 运行时还会生成伴生文件（-wal / -shm / -journal）。
+#   只写 *.sqlite3 会漏掉它们，导致 `git add .` 时把二进制垃圾一起提交（已踩过）。
+/backend/lunarlink.sqlite3*
+/sut/*.sqlite3*
