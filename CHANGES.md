@@ -92,8 +92,8 @@
 | `sut/routers/__init__.py` | 路由包 |
 | `sut/routers/system.py` | `/health` 健康检查（数据库不可用返回 503） |
 | `sut/routers/test_hooks.py` | 测试后门（仅 `SUT_ENABLE_TEST_HOOKS=1` 时挂载）：`/api/_test/ping`、`/api/_test/token`（签发任意 TTL，**等价认证绕过**）、`/api/_test/user/{username}/unlock`、`/api/_test/user/{username}/expire_lock`（只拨锁定时间、保留失败计数） |
-| `.github/workflows/daily-regression.yml` | 每日回归：定时 + 手动触发，起 SUT + 起平台 → pytest（201 条）→ Allure HTML → 上传 artifact |
-| `lunarlink_tests/test_09_lunarlink_smoke.py` | 平台冒烟 26 条（`platform` marker）；含认证头契约锁定、业务错误码、权限边界、轻量写闭环、3 条已知缺陷 xfail |
+| `.github/workflows/daily-regression.yml` | 每日回归：定时 + 手动触发，起 SUT + 起平台 → pytest（201 条）→ Allure HTML → 上传 artifact<br>★【现状以 README 为准】见本表下方注 |
+| `lunarlink_tests/test_09_lunarlink_smoke.py` | 平台冒烟 26 条（`platform` marker）；含认证头契约锁定、业务错误码、权限边界、轻量写闭环、3 条已知缺陷 xfail<br>★【现状以 README 为准】见本表下方注 |
 | `backend/apps/lunaruser/management/commands/ensure_smoke_user.py` | 扩展为幂等创建两个账号：非管理员（主力）+ 管理员（admin-only 端点） |
 | `README.md` | 追加 12 节测试体系说明（架构图 / 用法 / 用例清单 / 分层耗时实测 / 设计简化说明） |
 | `sut/routers/auth.py` | 认证模块：注册 / 登录（连续失败 5 次锁定 423 + Retry-After）/ 登出（纯 no-op）/ profile / refresh（旧换新） |
@@ -120,6 +120,20 @@
 | `lunarlink_tests/test_08_security.py` | 安全用例 18 条：水平越权(404) / 垂直越权(403) / token 矩阵 / 信息泄露 / 参数注入 |
 | `sut/runtime.py` | 在途请求计数（供 reset 做并发保护） |
 | `backend/apps/lunaruser/management/commands/ensure_smoke_user.py` | Django 管理命令：幂等创建回归冒烟账号，让套件能在干净 DB 上自举 |
+
+> 【现状以 README 为准】上表 `.github/workflows/daily-regression.yml` 与
+> `lunarlink_tests/test_09_lunarlink_smoke.py` 两栏是**当时**的记录，后来都有变化：
+>
+> 1. **CI 范围收窄为「只起 SUT、跑 175 条业务用例」**（不再起平台、不再跑 201 条）。
+>    平台冒烟 26 条改为**本地套件**（`-m platform`）。原因是 `backend/requirements-test.txt`
+>    与 `backend/requirements.txt` 依赖集冲突，实测合并后连 `sut/seed.py --reset` 都会失败，
+>    而 CI 只装前者。命令与原因见 workflow 头部注释与 `README.md` 第 10 节。
+>    → CI 上的权威计数（可匿名核实）：`总计 175 条 passed 174 skipped 1`。
+> 2. **那 3 条 xfail 已不存在**：对应缺陷修好后，`xfail(strict=True)` 如设计般触发
+>    `XPASS(strict)` 报警，随即被改造成 3 条**正向回归守卫**（总数仍 26，当前 `26 passed`）。
+>    详见 9.20（缺陷修复 + 守卫改造）与 9.14（归因更正）、`README.md` 第 11 节。
+>
+> 此处保留原文不改写，以维持变更记录的时间顺序。
 
 **修改**
 

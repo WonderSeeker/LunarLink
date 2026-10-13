@@ -301,11 +301,13 @@ delta 压缩把历史版本吃掉了。仓库现在已有 117 个提交 —— *
 | `test_07_concurrency.py` | 6 | **★ 防超卖**、**★ 支付幂等并发**、并发加购合并不丢更新、库存上限保护 |
 | `test_08_security.py` | 18 | 水平越权 404、垂直越权 403、token 矩阵、信息泄露、参数注入 |
 | **业务套件小计** | **175** | 174 passed + 1 skipped（唯一 skip 是刻意用来验证 skip 呈现的用例） |
-| `test_09_lunarlink_smoke.py` | 26 | **平台冒烟**（另一个被测对象）：认证头契约、只读端点信封、业务错误码、权限边界、轻量写闭环、3 条已知缺陷 xfail |
+| `test_09_lunarlink_smoke.py` | 26 | **平台冒烟**（另一个被测对象）：认证头契约、只读端点信封、业务错误码、权限边界、轻量写闭环、3 条「原 `xfail(strict=True)` 登记、缺陷修复后改造成正向守卫」 |
 | **合计** | **201** | 200 passed + 1 skipped |
 
-**场景类型分布**（按 marker 统计，一条用例可带多个标记）：`security` 40 / `negative` 36 /
-`smoke` 33 / `regression` 23 / `boundary` 13 / `concurrency` 6 / `platform` 26。
+**场景类型分布**（按 marker 统计，一条用例可带多个标记；下行为 2026-10-13 用
+`python -m pytest --collect-only -q -m <marker>` 实测，**随用例增删会变，别信冻结值**）：
+`negative` 49 / `security` 47 / `smoke` 38 / `boundary` 30 / `platform` 26 /
+`regression` 25 / `concurrency` 6。
 
 > `test_09` 被测的是 **LunarLink 平台自身**（8001），与前 9 个文件（测 `sut/`）是**两个不同对象**，
 > 因此单独用 `platform` marker 统计，`-m platform` / `-m "not platform"` 可分别执行。
